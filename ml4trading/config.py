@@ -15,6 +15,7 @@ SESSION_MINUTES = 390  # one regular US equity session, 09:30-16:00 ET
 BAR_MINUTES = 30  # the dataset's bar width
 TRADING_DAYS_PER_YEAR = 252
 TIMEZONE = "America/New_York"
+BENCHMARK = "VOO"  # the market every book's alpha and beta are measured against
 
 
 @dataclass(frozen=True)
@@ -85,7 +86,7 @@ class RunConfig:
     trader: TraderConfig = field(default_factory=TraderConfig)
     folds: FoldConfig = field(default_factory=FoldConfig)
     costs: CostConfig = field(default_factory=CostConfig)
-    capital: float = 2000.0  # the strategy's capital basis: each period sizes min(capital, equity)
+    capital: float = 20000.0  # the capital basis: each period sizes min(capital, equity)
 
     @property
     def hold_overnight(self) -> bool:

@@ -35,7 +35,7 @@ def _hold(panel, prediction=0.01):
 
 
 def test_buy_and_hold_telescopes_and_pays_one_entry():
-    cfg = config.resolve("investment", {"costs.spread_bps": 4.0})
+    cfg = config.resolve("investment", {"costs.spread_bps": 4.0, "capital": 2000.0})
     panel = _panel([150.0, 151.0, 149.0, 153.0, 152.0])
     book, positions = run_book(_hold(panel), panel, panel["period"][:-1], cfg)
     assert set(positions["shares"]) == {13.0}  # floor(2000 / 150), then held
@@ -46,14 +46,14 @@ def test_buy_and_hold_telescopes_and_pays_one_entry():
 
 
 def test_dividends_are_credited_to_the_holder():
-    cfg = config.resolve("investment")
+    cfg = config.resolve("investment", {"capital": 2000.0})
     panel = _panel([150.0, 150.0, 150.0], divs=[0.0, 0.01, 0.0])
     book, _ = run_book(_hold(panel), panel, panel["period"][:-1], cfg)
     assert book["gross"].sum() == pytest.approx(13 * 150 * 0.01)
 
 
 def test_a_symbol_without_a_mark_is_carried_not_sold():
-    cfg = config.resolve("investment")
+    cfg = config.resolve("investment", {"capital": 2000.0})
     panel = _panel([150.0, 151.0, 152.0, 153.0])
     gap = panel.drop(index=1).copy()
     gap.loc[0, "exit_px"] = 152.0  # the next available open spans the gap
@@ -64,7 +64,7 @@ def test_a_symbol_without_a_mark_is_carried_not_sold():
 
 
 def test_intraday_flattens_every_session():
-    cfg = config.resolve("investment", {"model.hold_overnight": False})
+    cfg = config.resolve("investment", {"model.hold_overnight": False, "capital": 2000.0})
     panel = _panel([100.0, 100.0, 100.0], closes=[101.0, 99.0, 100.0])
     panel["exit_px"] = panel["close"]
     book, _ = run_book(_hold(panel), panel, panel["period"], cfg)
@@ -76,14 +76,14 @@ def test_intraday_flattens_every_session():
 
 def test_a_position_worth_more_than_the_budget_is_trimmed():
     # 20 x 101 = 2020$ exceeds the 2000$ basis (the per-name cap is vs the budget)
-    cfg = config.resolve("investment")
+    cfg = config.resolve("investment", {"capital": 2000.0})
     panel = _panel([100.0, 101.0, 101.0])
     _, positions = run_book(_hold(panel), panel, panel["period"][:-1], cfg)
     assert list(positions["shares"]) == [20.0, 19.0]
 
 
 def test_the_budget_is_the_capital_basis_even_when_equity_grows():
-    cfg = config.resolve("investment")
+    cfg = config.resolve("investment", {"capital": 2000.0})
     panel = _panel([100.0, 200.0, 200.0, 200.0])
     _, positions = run_book(_hold(panel), panel, panel["period"][:-1], cfg)
     assert list(positions["shares"]) == [20.0, 10.0, 10.0]
@@ -98,7 +98,7 @@ def test_metrics():
 
 
 def test_summary_reports_net_of_costs():
-    cfg = config.resolve("investment")
+    cfg = config.resolve("investment", {"capital": 2000.0})
     panel = _panel([150.0, 151.0, 152.0])
     book, _ = run_book(_hold(panel), panel, panel["period"][:-1], cfg)
     s = summarize(book)

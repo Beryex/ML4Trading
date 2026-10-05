@@ -45,29 +45,31 @@ pytest
   `min(capital, equity)`, with a switching-friction rule that avoids trades whose cost exceeds
   the tracking error they remove. Entries are modelled as passive limit orders (no spread),
   exits as market orders (half the quoted spread); every order pays a per-share commission
-  with a minimum. The defaults: $2,000 capital, a 4 bp quoted spread, $0.0035/share with a
-  $0.35 minimum.
-- **Metrics** (`metrics.py`). Net Sharpe (per-session returns, annualized by √252), max
-  drawdown, cumulative and annualized return, costs.
+  with a minimum; shorts pay a borrow fee and owe dividends. The defaults: $20,000 capital, a
+  4 bp quoted spread, $0.0035/share with a $0.35 minimum, 1 %/year borrow.
+- **Metrics** (`metrics.py`). Net and gross Sharpe (per-session returns, annualized by √252;
+  per period for multi-session `K`), net profit, cumulative and annualized return, max
+  drawdown, alpha and beta against VOO, costs paid, and trade statistics: a trade runs from a
+  position's opening to its closing, and the trade hit rate is the share of completed trades
+  that made money after their own costs.
 
 All knobs and their defaults live in `ml4trading/config.py`; `--set key=value` overrides one
 (`--set capital=10000`, `--set costs.spread_bps=2`).
 
 ## The baselines
 
-Two buy-and-hold benchmarks a learned model has to beat: `investment` holds 100 % VOO (S&P 500)
-and `investment_tech` 100 % QQQ (Nasdaq-100). Measured with the defaults above on the full
-dataset (test path 2020-01-02 to 2026-08-28, 1,673 sessions -- the data's last session,
-2026-08-31, has no next open to exit at; `runs/<method>/backtest/metrics.json`):
+Two buy-and-hold benchmarks a learned model has to beat: `investment` holds VOO (S&P 500) and
+`investment_tech` QQQ (Nasdaq-100). Measured with the defaults above on the full dataset (test
+path 2020-01-02 to 2026-08-28, 1,673 sessions -- the data's last session, 2026-08-31, has no
+next open to exit at; `runs/<method>/backtest/metrics.json`):
 
-| method | net Sharpe | max drawdown | cumulative return | annualized return | annualized volatility |
-|---|---:|---:|---:|---:|---:|
-| `investment` (VOO) | 0.785 | −29.4 % | +95.7 % | 10.6 % | 14.2 % |
-| `investment_tech` (QQQ) | 0.839 | −25.8 % | +124.0 % | 12.9 % | 16.0 % |
+| method | net Sharpe | net profit | cumulative return | max drawdown | alpha vs VOO | beta |
+|---|---:|---:|---:|---:|---:|---:|
+| `investment` (VOO) | 0.772 | $20,616 | +103.1 % | −31.8 % | −1.0 % | 0.79 |
+| `investment_tech` (QQQ) | 0.859 | $27,831 | +139.2 % | −26.9 % | +1.3 % | 0.82 |
 
-Both size against `min(capital, equity)`, so once equity grows past the $2,000 basis the excess
-stays in cash, so the books' drawdowns are shallower than the ETFs' own (same path,
-open-to-open with dividends: VOO −32.1 %, QQQ −36.7 %).
+Both size against `min(capital, equity)`, so once equity grows past the $20,000 basis the
+excess stays in cash -- which is why the VOO book's beta to VOO is 0.79, not 1.
 
 ## Adding a model
 

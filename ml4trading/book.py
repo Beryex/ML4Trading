@@ -27,6 +27,28 @@ from ml4trading.costs import leg_amounts, leg_cost
 from ml4trading.sizing import size_shares
 from ml4trading.trader import target_weights
 
+#: One row per (period, symbol) held before or after the period's trades: the share change,
+#: the symbol's own gross P&L and its costs, split by leg so a trade can be costed exactly
+#: (``ml4trading.metrics.trade_stats``). ``close_*`` is the intraday session-close exit;
+#: ``session_end`` marks the period it happens in.
+POSITION_COLUMNS = [
+    "period",
+    "symbol",
+    "prev_shares",
+    "shares",
+    "price",
+    "gross",
+    "entry_spread",
+    "entry_commission",
+    "exit_spread",
+    "exit_commission",
+    "close_spread",
+    "close_commission",
+    "borrow",
+    "traded",
+    "session_end",
+]
+
 
 def periods_per_year(k: int) -> float:
     """Decision periods per trading year: 252 x 390 / K up to one session, 252 / N for N-session
@@ -95,37 +117,53 @@ def run_book(predictions: pd.DataFrame, panel: pd.DataFrame, periods, cfg: RunCo
                 costs=costs,
             )
 
-        spread_cost = commission = traded = 0.0
+        # per-symbol accounting: every name held before or after this period's trades
+        flatten = not cfg.hold_overnight and last_of_session[session_of[p]] == p
+        recs = []
         for sym in sorted(set(prev) | set(shares)):
-            if sym not in prices:
-                continue  # carried: no trade
-            entry, exit_ = leg_amounts(prev.get(sym, 0.0), shares.get(sym, 0.0))
-            if entry == 0.0 and exit_ == 0.0:
-                continue
-            sc, cm = leg_cost(entry, exit_, prices[sym], costs)
-            spread_cost += sc
-            commission += cm
-            traded += (entry + exit_) * prices[sym]
+            before, after = prev.get(sym, 0.0), shares.get(sym, 0.0)
+            px = prices.get(sym)
+            r = {
+                "period": p,
+                "symbol": sym,
+                "prev_shares": before,
+                "shares": after,
+                "price": px,
+                "gross": 0.0,
+                "entry_spread": 0.0,
+                "entry_commission": 0.0,
+                "exit_spread": 0.0,
+                "exit_commission": 0.0,
+                "close_spread": 0.0,
+                "close_commission": 0.0,
+                "borrow": 0.0,
+                "traded": 0.0,
+            }
+            if px is not None:  # a carried name (no price) cannot trade
+                entry, exit_ = leg_amounts(before, after)
+                r["entry_spread"], r["entry_commission"] = leg_cost(entry, 0.0, px, costs)
+                r["exit_spread"], r["exit_commission"] = leg_cost(0.0, exit_, px, costs)
+                r["traded"] = (entry + exit_) * px
+                r["gross"] = after * (exits[sym] - px) + after * px * divs[sym]
+            mark = px if px is not None else last_price.get(sym, np.nan)
+            if after < 0 and mark == mark:
+                r["borrow"] = abs(after) * mark * borrow_per_period
+            if flatten and after:  # intraday: the session-close exit of what is held
+                close_px = exits.get(sym, last_price.get(sym, np.nan))
+                if close_px == close_px:
+                    r["close_spread"], r["close_commission"] = leg_cost(
+                        0.0, abs(after), close_px, costs
+                    )
+                    r["traded"] += abs(after) * close_px
+            recs.append(r)
 
-        gross = borrow = 0.0
-        for sym, n in shares.items():
-            if sym in prices:
-                gross += n * (exits[sym] - prices[sym]) + n * prices[sym] * divs[sym]
-                mark = prices[sym]
-            else:
-                mark = last_price.get(sym, np.nan)
-            if n < 0 and mark == mark:
-                borrow += abs(n) * mark * borrow_per_period
-
-        if not cfg.hold_overnight and last_of_session[session_of[p]] == p:
-            for sym, n in shares.items():  # the session-close flatten
-                px = exits.get(sym, last_price.get(sym, np.nan))
-                if px == px and n:
-                    sc, cm = leg_cost(0.0, abs(n), px, costs)
-                    spread_cost += sc
-                    commission += cm
-                    traded += abs(n) * px
-
+        spread_cost = sum(r["entry_spread"] + r["exit_spread"] + r["close_spread"] for r in recs)
+        commission = sum(
+            r["entry_commission"] + r["exit_commission"] + r["close_commission"] for r in recs
+        )
+        gross = sum(r["gross"] for r in recs)
+        borrow = sum(r["borrow"] for r in recs)
+        traded = sum(r["traded"] for r in recs)
         net = gross - spread_cost - commission - borrow
         equity = equity_before + net
         rows.append(
@@ -144,10 +182,11 @@ def run_book(predictions: pd.DataFrame, panel: pd.DataFrame, periods, cfg: RunCo
                 "traded_notional": traded,
             }
         )
-        for sym, n in shares.items():
-            pos_rows.append({"period": p, "symbol": sym, "shares": n, "price": prices.get(sym)})
+        for r in recs:
+            r["session_end"] = flatten
+        pos_rows.extend(recs)
         last_price.update(prices)
         prev = shares
     book = pd.DataFrame(rows)
-    positions = pd.DataFrame(pos_rows, columns=["period", "symbol", "shares", "price"])
+    positions = pd.DataFrame(pos_rows, columns=POSITION_COLUMNS)
     return book, positions

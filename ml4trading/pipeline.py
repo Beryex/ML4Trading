@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from ml4trading.book import run_book
-from ml4trading.config import RunConfig
+from ml4trading.config import BENCHMARK, SESSION_MINUTES, RunConfig
 from ml4trading.data import all_symbols, load_bars, load_dividends
 from ml4trading.metrics import summarize
 from ml4trading.models import get_model
@@ -38,7 +38,22 @@ def window_periods(panel: pd.DataFrame, window, skip_sessions: int = 0) -> list[
     return sorted(inside.loc[inside["session"] >= first, "period"].unique())
 
 
-def score_book(predictions: pd.DataFrame, panel: pd.DataFrame, periods, cfg: RunConfig):
-    """(book, positions, metrics) of ``predictions`` traded over ``periods``."""
+def benchmark_returns(data_dir: Path, k: int) -> pd.Series:
+    """The benchmark's buy-and-hold return (open to next open, dividends included) per entry of
+    a book's Sharpe series: per session for K <= 390, per N-session block for K = 390 x N."""
+    bars = load_bars(data_dir, [BENCHMARK])
+    panel = build_panel(bars, max(k, SESSION_MINUTES), True, load_dividends(data_dir, [BENCHMARK]))
+    return panel.set_index("session")["y"]
+
+
+def score_book(
+    predictions: pd.DataFrame,
+    panel: pd.DataFrame,
+    periods,
+    cfg: RunConfig,
+    benchmark: pd.Series | None = None,
+):
+    """(book, positions, metrics) of ``predictions`` traded over ``periods``; trade statistics
+    always, alpha/beta when ``benchmark`` is given."""
     book, positions = run_book(predictions, panel, periods, cfg)
-    return book, positions, summarize(book, cfg.K)
+    return book, positions, summarize(book, cfg.K, positions, benchmark)

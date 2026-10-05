@@ -20,7 +20,7 @@ import pandas as pd
 
 from ml4trading.config import RunConfig
 from ml4trading.data import default_data_dir
-from ml4trading.pipeline import load_panel, score_book, window_periods
+from ml4trading.pipeline import benchmark_returns, load_panel, score_book, window_periods
 
 
 def backtest(run_dir: Path, data_dir: Path) -> dict:
@@ -35,7 +35,8 @@ def backtest(run_dir: Path, data_dir: Path) -> dict:
     _, panel = load_panel(cfg, data_dir)
     path = (folds[0]["test"][0], folds[-1]["test"][1])
     periods = window_periods(panel, path)
-    book, positions, metrics = score_book(preds, panel, periods, cfg)
+    benchmark = benchmark_returns(data_dir, cfg.K)
+    book, positions, metrics = score_book(preds, panel, periods, cfg, benchmark)
 
     out = run_dir / "backtest"
     out.mkdir(exist_ok=True)
