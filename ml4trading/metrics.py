@@ -177,7 +177,8 @@ def summarize_by_year(
     """One row per calendar year: ``summarize`` over that year's days (its profit, Sharpe,
     drawdown, alpha/beta) and the costs of the periods that start in it, with the trade
     statistics of the trades that CLOSED in it, and ``full_year`` -- whether the account was
-    valued on the year's first and last NYSE sessions."""
+    valued from the year's first to its last NYSE session (within N - 1 sessions at either end
+    for an N-session book, whose first and last blocks need not align with the year)."""
     from ml4trading.book import daily_values
     from ml4trading.periods import nyse_sessions
 
@@ -194,6 +195,11 @@ def summarize_by_year(
         row.update(summarize(part, k, None, benchmark, days.reset_index(drop=True)))
         row.update(_trade_summary(done[done["end"].dt.year == year], 0))
         del row["open_trades_at_end"]
-        row["full_year"] = bool(first <= in_year[0] and in_year[-1] <= last)
+        # an N-session book is valued from its first block's anchor: the year's first or last
+        # N - 1 sessions may belong to a block keyed outside the test path
+        slack = max(k // SESSION_MINUTES, 1) - 1
+        start_gap = sessions.get_loc(first) - sessions.get_loc(in_year[0])
+        end_gap = sessions.get_loc(in_year[-1]) - sessions.get_loc(last)
+        row["full_year"] = bool(start_gap <= slack and end_gap <= slack)
         rows.append(row)
     return pd.DataFrame(rows)
