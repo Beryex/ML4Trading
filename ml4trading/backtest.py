@@ -7,7 +7,9 @@ prediction per (period, symbol) along the whole path; the book trades them under
 configuration, starting flat at the capital basis. A fold boundary is a rebalance, not a
 liquidation.
 
-Writes ``<run>/backtest/``: metrics.json, book.csv (one row per period), positions.csv.
+Writes ``<run>/backtest/``: metrics.json (the whole path), by_year.csv (each calendar year,
+``full_year`` marking the years the path covers entirely), book.csv (one row per period) and
+positions.csv (one row per symbol and period, with its P&L and costs).
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import pandas as pd
 
 from ml4trading.config import RunConfig
 from ml4trading.data import default_data_dir
+from ml4trading.metrics import summarize_by_year
 from ml4trading.pipeline import benchmark_returns, load_panel, score_book, window_periods
 
 
@@ -41,6 +44,7 @@ def backtest(run_dir: Path, data_dir: Path) -> dict:
     out = run_dir / "backtest"
     out.mkdir(exist_ok=True)
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    summarize_by_year(book, cfg.K, positions, benchmark).to_csv(out / "by_year.csv", index=False)
     book.to_csv(out / "book.csv", index=False)
     positions.to_csv(out / "positions.csv", index=False)
     return metrics

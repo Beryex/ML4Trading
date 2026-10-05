@@ -102,3 +102,33 @@ def test_the_book_records_every_symbol_it_touches():
     s = trade_stats(positions)
     assert s["n_trades"] == 1
     assert s["mean_trade_pnl"] == pytest.approx(book["net"].sum())  # one trade = the whole book
+
+
+def test_years_are_reported_separately_and_trades_belong_to_their_closing_year():
+    from ml4trading.metrics import summarize_by_year
+
+    days = pd.DatetimeIndex(["2020-12-30", "2020-12-31", "2021-01-04", "2021-01-05"])
+    book = pd.DataFrame(
+        {
+            "period": days,
+            "session": days,
+            "equity_before": [100.0, 110.0, 99.0, 104.0],
+            "gross": [10.0, -11.0, 5.0, 1.0],
+            "spread_cost": 0.0,
+            "commission": 0.0,
+            "borrow": 0.0,
+            "traded_notional": 0.0,
+        }
+    )
+    book["net"] = book["gross"]
+    book["ret"] = book["net"] / book["equity_before"]
+    book["equity"] = book["equity_before"] + book["net"]
+    rows = _rows("A", [(0, 10, 10.0, 0.0, 0.0), (10, 10, -11.0, 0.0, 0.0), (10, 0, 0.0, 0.0, 0.0)])
+    for r, d in zip(rows, days[:3], strict=True):
+        r["period"] = d
+    out = summarize_by_year(book, 390, pd.DataFrame(rows)).set_index("year")
+    assert list(out.index) == [2020, 2021]
+    assert out.loc[2020, "net_profit"] == pytest.approx(-1.0)
+    assert out.loc[2021, "net_profit"] == pytest.approx(6.0)
+    assert out.loc[2020, "n_trades"] == 0 and out.loc[2021, "n_trades"] == 1  # closed in 2021
+    assert not out.loc[2020, "full_year"]  # the book starts on 2020-12-30

@@ -69,41 +69,53 @@ def alpha_beta(returns: pd.Series, benchmark: pd.Series, per_year: float) -> dic
     }
 
 
-def trade_stats(positions: pd.DataFrame) -> dict:
-    """Completed-trade statistics from ``run_book``'s positions frame (module docstring)."""
-    pnls, lengths, open_at_end = [], [], 0
-    cols = ["prev_shares", "shares", "gross", "borrow"]
-    for _, g in positions.sort_values(["symbol", "period"], kind="stable").groupby("symbol"):
-        pnl, length, is_open = 0.0, 0, False
+def trades(positions: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """(one row per COMPLETED trade -- symbol, start, end, periods, pnl --, the number still
+    open at the end) from ``run_book``'s positions frame (module docstring). ``end`` is the
+    period whose trades close it (the closing leg executes at that period's open)."""
+    out, open_at_end = [], 0
+    cols = ["period", "prev_shares", "shares", "gross", "borrow"]
+    for sym, g in positions.sort_values(["symbol", "period"], kind="stable").groupby("symbol"):
+        pnl, length, start, is_open = 0.0, 0, None, False
         entry_cost = (g["entry_spread"] + g["entry_commission"]).to_numpy()
         exit_cost = (g["exit_spread"] + g["exit_commission"]).to_numpy()
         close_cost = (g["close_spread"] + g["close_commission"]).to_numpy()
         session_end = g["session_end"].to_numpy(dtype=bool)
-        for i, (before, after, gross, borrow) in enumerate(g[cols].itertuples(index=False)):
+        for i, (period, before, after, gross, borrow) in enumerate(g[cols].itertuples(index=False)):
             if is_open:
                 pnl -= exit_cost[i]  # trims and the closing leg belong to the open trade
                 if after == 0 or before * after < 0:
-                    pnls.append(pnl)
-                    lengths.append(length)
+                    out.append((sym, start, period, length, pnl))
                     is_open = False
             if after != 0:
                 if not is_open:
-                    pnl, length, is_open = 0.0, 0, True
+                    pnl, length, start, is_open = 0.0, 0, period, True
                 pnl += gross - borrow - entry_cost[i]
                 length += 1
                 if session_end[i]:  # intraday: flattened at the session close
-                    pnls.append(pnl - close_cost[i])
-                    lengths.append(length)
+                    out.append((sym, start, period, length, pnl - close_cost[i]))
                     is_open = False
         open_at_end += int(is_open)
-    n = len(pnls)
+    frame = pd.DataFrame(out, columns=["symbol", "start", "end", "periods", "pnl"])
+    frame["start"] = pd.to_datetime(frame["start"])
+    frame["end"] = pd.to_datetime(frame["end"])
+    return frame, open_at_end
+
+
+def _trade_summary(done: pd.DataFrame, open_at_end: int) -> dict:
+    n = len(done)
     return {
         "n_trades": n,
-        "trade_hit_rate": float(np.mean(np.asarray(pnls) > 0)) if n else None,
-        "mean_trade_pnl": float(np.mean(pnls)) if n else None,
-        "median_trade_periods": float(np.median(lengths)) if n else None,
+        "trade_hit_rate": float((done["pnl"] > 0).mean()) if n else None,
+        "mean_trade_pnl": float(done["pnl"].mean()) if n else None,
+        "median_trade_periods": float(done["periods"].median()) if n else None,
         "open_trades_at_end": open_at_end,
     }
+
+
+def trade_stats(positions: pd.DataFrame) -> dict:
+    """Completed-trade statistics from ``run_book``'s positions frame (module docstring)."""
+    return _trade_summary(*trades(positions))
 
 
 def summarize(
@@ -151,3 +163,38 @@ def summarize(
     if positions is not None:
         out.update(trade_stats(positions))
     return out
+
+
+def summarize_by_year(
+    book: pd.DataFrame,
+    k: int,
+    positions: pd.DataFrame,
+    benchmark: pd.Series | None = None,
+) -> pd.DataFrame:
+    """One row per calendar year of the book: ``summarize`` over that year's periods (its
+    profit, Sharpe, drawdown, alpha/beta), with the trade statistics of the trades that
+    CLOSED in it, and ``full_year`` -- whether the book covers the year's first and last NYSE
+    sessions."""
+    from ml4trading.periods import nyse_sessions
+
+    sessions = nyse_sessions()
+    done, _ = trades(positions)
+    first, last = book["period"].min(), book["period"].max()
+    rows = []
+    for year, part in book.groupby(book["session"].dt.year, sort=True):
+        in_year = sessions[sessions.year == year]
+        row = {"year": int(year)}
+        row.update(summarize(part.reset_index(drop=True), k, None, benchmark))
+        row.update(_trade_summary(done[done["end"].dt.year == year], 0))
+        del row["open_trades_at_end"]
+        slack = _block_slack(k)
+        row["full_year"] = bool(first <= in_year[0] + slack and in_year[-1] <= last + slack)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _block_slack(k: int) -> pd.Timedelta:
+    """N-session blocks do not align with years: the year's first sessions may sit in a block
+    keyed in the previous year, and its last block may start up to N - 1 sessions before the
+    year's end -- a book within that slack of both ends covers the year."""
+    return pd.Timedelta(days=0) if k <= SESSION_MINUTES else pd.Timedelta(days=14)
