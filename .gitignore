@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Data and run outputs are never committed (see DATA.md)
+data/
+runs/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
