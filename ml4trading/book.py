@@ -29,6 +29,10 @@ from ml4trading.trader import target_weights
 
 
 def periods_per_year(k: int) -> float:
+    """Decision periods per trading year: 252 x 390 / K up to one session, 252 / N for N-session
+    periods."""
+    if k > SESSION_MINUTES:
+        return TRADING_DAYS_PER_YEAR / (k // SESSION_MINUTES)
     return TRADING_DAYS_PER_YEAR * SESSION_MINUTES / k
 
 

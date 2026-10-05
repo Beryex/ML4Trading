@@ -2,7 +2,11 @@
 
 A PERIOD is the unit of decision: positions are set at the period's open and valued at its exit.
 Its key is a tz-naive New York wall-clock timestamp: K = 390 -> the session date (one period per
-session, half days included); K < 390 -> the bar start floored to K minutes.
+session, half days included); K < 390 -> the bar start floored to K minutes; K = 390 x N -> the
+first session of the bar's N-session BLOCK. Blocks tile the NYSE session calendar counted from a
+fixed epoch (1990-01-01), so a block is always exactly N sessions, independent of the data
+window; at N = 5 a block is a trading week that slides past holidays rather than a calendar week.
+For every K >= 390 the ``session`` column is the period key itself (the block's first session).
 
 The panel built here has one row per (period, symbol) with a traded bar, and columns
     period, session, symbol, open, high, low, close, volume   -- the aggregated bar
@@ -16,10 +20,15 @@ predicted but not traded or fitted on.
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 import pandas as pd
 
 from ml4trading.config import BAR_MINUTES, SESSION_MINUTES, TIMEZONE
+
+BLOCK_EPOCH = "1990-01-01"
+BLOCK_HORIZON = "2035-12-31"
 
 PANEL_COLUMNS = [
     "period",
@@ -37,13 +46,45 @@ PANEL_COLUMNS = [
 ]
 
 
+@functools.lru_cache(maxsize=1)
+def nyse_sessions() -> pd.DatetimeIndex:
+    """Every NYSE session date from ``BLOCK_EPOCH`` to ``BLOCK_HORIZON`` (tz-naive)."""
+    import pandas_market_calendars as mcal
+
+    sched = mcal.get_calendar("NYSE").schedule(start_date=BLOCK_EPOCH, end_date=BLOCK_HORIZON)
+    idx = pd.DatetimeIndex(sched.index).normalize()
+    return idx.tz_localize(None) if idx.tz is not None else idx
+
+
+def block_anchors(dates: pd.Series, n: int) -> pd.Series:
+    """The first session of the N-session block holding each (tz-naive, normalized) date."""
+    sessions = nyse_sessions()
+    values = dates.to_numpy(dtype="datetime64[ns]")
+    ordinal = sessions.searchsorted(values, side="right") - 1
+    if (ordinal < 0).any() or (values > sessions[-1].to_datetime64()).any():
+        raise ValueError(f"a date lies outside the session calendar {BLOCK_EPOCH}..{BLOCK_HORIZON}")
+    return pd.Series(sessions[(ordinal // n) * n], index=dates.index)
+
+
+def check_k(k: int) -> None:
+    if k <= 0 or k % BAR_MINUTES:
+        raise ValueError(f"K={k}: must be a positive multiple of {BAR_MINUTES}")
+    if k > SESSION_MINUTES and k % SESSION_MINUTES:
+        raise ValueError(
+            f"K={k}: above one session it must be a whole number of sessions (390 x N)"
+        )
+    if k < SESSION_MINUTES and (24 * 60) % k:
+        raise ValueError(f"K={k}: an intraday K must divide a day (1440 minutes)")
+
+
 def period_keys(ts: pd.Series, k: int) -> pd.Series:
     """Each bar's period key (module docstring) from its tz-aware start ``ts``."""
-    if k % BAR_MINUTES or k <= 0 or k > SESSION_MINUTES:
-        raise ValueError(f"K={k}: must be a positive multiple of {BAR_MINUTES} up to 390")
+    check_k(k)
     naive = ts.dt.tz_convert(TIMEZONE).dt.tz_localize(None)
     if k == SESSION_MINUTES:
         return naive.dt.normalize()
+    if k > SESSION_MINUTES:
+        return block_anchors(naive.dt.normalize(), k // SESSION_MINUTES)
     return naive.dt.floor(f"{k}min")
 
 

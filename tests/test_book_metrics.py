@@ -102,7 +102,7 @@ def test_summary_reports_net_of_costs():
     panel = _panel([150.0, 151.0, 152.0])
     book, _ = run_book(_hold(panel), panel, panel["period"][:-1], cfg)
     s = summarize(book)
-    assert s["n_sessions"] == 2
+    assert s["n_periods"] == 2
     assert s["cumulative_return"] == pytest.approx((2000 + 26 - 0.35) / 2000 - 1)
 
 
@@ -115,3 +115,11 @@ def test_a_period_nothing_can_be_traded_in_is_not_a_book_period():
     assert window_periods(panel, (panel["session"].min(), panel["session"].max()), 1) == [
         panel["period"].iloc[1]
     ]
+
+
+def test_weekly_sharpe_is_annualized_by_blocks_per_year():
+    from ml4trading.metrics import series_per_year
+
+    assert series_per_year(390) == 252
+    assert series_per_year(1950) == pytest.approx(50.4)
+    assert sharpe([0.02, 0.0], series_per_year(1950)) == pytest.approx(np.sqrt(50.4))

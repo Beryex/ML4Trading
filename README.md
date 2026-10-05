@@ -27,7 +27,8 @@ pytest
 ```
 
 - **Periods** (`periods.py`). Bars are aggregated into decision periods of `K` minutes
-  (`K = 390`: one per session). Each (period, symbol) row carries its realized label
+  (`K = 390`: one per session; `K = 390 x N`: one per N-session block of the exchange calendar,
+  so `K = 1950` trades once a week). Each (period, symbol) row carries its realized label
   `y = exit / open - 1 (+ dividends)`: overnight the exit is the next period's open (positions
   are held across the close), intraday it is the period's close.
 - **Folds** (`folds.py`). For every month `B` of the test path (2020-01 to 2026-08 by default):

@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ml4trading.periods import build_panel, dividend_returns, period_bars
+from ml4trading.periods import build_panel, dividend_returns, period_bars, period_keys
 
 TZ = "America/New_York"
 
@@ -81,3 +81,53 @@ def test_dividend_interval_sum():
 def test_k_must_be_a_multiple_of_the_bar():
     with pytest.raises(ValueError):
         period_bars(two_sessions(), 45)
+
+
+def _daily_bars(start, end, symbol="X"):
+    days = pd.bdate_range(start, end)
+    ts = pd.DatetimeIndex([d + pd.Timedelta("9h30min") for d in days]).tz_localize(TZ)
+    px = np.arange(len(ts), dtype=float) + 100.0
+    return pd.DataFrame(
+        {
+            "ts": ts,
+            "symbol": symbol,
+            "open": px,
+            "high": px,
+            "low": px,
+            "close": px + 0.5,
+            "volume": 1.0,
+        }
+    )
+
+
+def test_weekly_periods_are_five_session_blocks_of_the_exchange_calendar():
+    from ml4trading.periods import nyse_sessions
+
+    # 2021-01-18 (MLK day) and 2021-02-15 (Presidents' day) are holidays: blocks slide past them
+    bars = _daily_bars("2021-01-04", "2021-03-05")
+    sessions = nyse_sessions()
+    bars = bars[bars["ts"].dt.tz_localize(None).dt.normalize().isin(sessions)]
+    pb = period_bars(bars, 1950)
+    anchors = list(pb["period"])
+    pos = [sessions.get_loc(a) for a in anchors]
+    assert all(b - a == 5 for a, b in zip(pos, pos[1:], strict=False))
+    assert all(p % 5 == 0 for p in pos)  # counted from the fixed epoch
+    sizes = bars.groupby(period_keys(bars["ts"], 1950).to_numpy()).size()
+    assert set(sizes.iloc[1:-1]) == {5}  # every whole block holds exactly five sessions
+
+
+def test_weekly_label_is_next_block_open_over_this_block_open():
+    bars = _daily_bars("2021-03-01", "2021-03-31")
+    panel = build_panel(bars, 1950, hold_overnight=True)
+    first, second = panel.iloc[0], panel.iloc[1]
+    assert first["exit_px"] == second["open"]
+    assert first["session"] == first["period"]
+    assert first["y"] == pytest.approx(second["open"] / first["open"] - 1)
+
+
+@pytest.mark.parametrize("k", [420, 45, 0])
+def test_invalid_k_is_refused(k):
+    from ml4trading.periods import check_k
+
+    with pytest.raises(ValueError):
+        check_k(k)

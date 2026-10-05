@@ -41,4 +41,4 @@ def window_periods(panel: pd.DataFrame, window, skip_sessions: int = 0) -> list[
 def score_book(predictions: pd.DataFrame, panel: pd.DataFrame, periods, cfg: RunConfig):
     """(book, positions, metrics) of ``predictions`` traded over ``periods``."""
     book, positions = run_book(predictions, panel, periods, cfg)
-    return book, positions, summarize(book)
+    return book, positions, summarize(book, cfg.K)

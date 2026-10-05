@@ -79,7 +79,7 @@ class TraderConfig:
 @dataclass(frozen=True)
 class RunConfig:
     method: str
-    K: int  # period length in minutes: a multiple of BAR_MINUTES; 390 = one period per session
+    K: int  # period minutes: a multiple of BAR_MINUTES; 390 = a session; 390 x N = N sessions
     model: dict[str, Any] = field(default_factory=dict)
     selector: SelectorConfig = field(default_factory=SelectorConfig)
     trader: TraderConfig = field(default_factory=TraderConfig)
@@ -122,6 +122,9 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
     "investment": _SINGLE_ETF_HOLD,
     # 100 % QQQ (Nasdaq-100): the technology-heavy buy-and-hold baseline.
     "investment_tech": _SINGLE_ETF_HOLD,
+    # Last week's change as the forecast (reverse: its negative), rebalanced once per 5-session
+    # block, the default trader on top. ``--set K=390`` is the daily version.
+    "momentum": {"K": 1950, "model": {"hold_overnight": True, "reverse": False}},
 }
 
 
@@ -188,13 +191,13 @@ def expand_grid(cfg: RunConfig, grid: dict[str, list] | None) -> list[RunConfig]
 
 
 def validate(cfg: RunConfig) -> None:
-    k = cfg.K
-    if k % BAR_MINUTES or k <= 0 or k > SESSION_MINUTES:
-        raise ValueError(f"K={k}: must be a positive multiple of {BAR_MINUTES} up to 390")
-    if k != SESSION_MINUTES and (24 * 60) % k:
-        raise ValueError(f"K={k}: an intraday K must divide a day (1440 minutes)")
+    from ml4trading.periods import check_k
+
+    check_k(cfg.K)
     if "hold_overnight" not in cfg.model:
         raise ValueError("model.hold_overnight is required")
+    if cfg.K > SESSION_MINUTES and not cfg.model["hold_overnight"]:
+        raise ValueError(f"K={cfg.K} spans several sessions: it needs model.hold_overnight")
     if cfg.trader.symbol_selection_strategy not in ("BOTH", "BUY_LONG", "SELL_SHORT"):
         raise ValueError(f"unknown strategy {cfg.trader.symbol_selection_strategy!r}")
     if cfg.folds.step_months != 1:

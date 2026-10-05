@@ -75,7 +75,7 @@ def test_a_learned_model_is_searched_per_fold_and_causal(data_dir, tmp_path):
     assert preds["period"].min() >= pd.Timestamp("2021-07-01")
     assert preds["period"].max() <= pd.Timestamp("2021-07-31")
     metrics = backtest(run, data_dir)
-    assert metrics["n_sessions"] > 100
+    assert metrics["n_periods"] > 100
 
     cfg = config.resolve("last_return_test", SHORT_FOLDS)
     _, panel = load_panel(cfg, data_dir)
