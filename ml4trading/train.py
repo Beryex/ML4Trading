@@ -35,7 +35,7 @@ from ml4trading.config import RunConfig
 from ml4trading.data import default_data_dir
 from ml4trading.folds import embargoed_end, fold_at, fold_boundaries
 from ml4trading.models import get_model
-from ml4trading.pipeline import load_panel, score_book, window_periods
+from ml4trading.pipeline import load_daily_inputs, load_panel, score_book, window_periods
 from ml4trading.selector import select_universe
 
 
@@ -69,6 +69,7 @@ def train(
             raise ValueError(f"grid key {key!r}: only model.* parameters are searched per fold")
     candidates = config_mod.expand_grid(base, grid)
     pool, panel = load_panel(base, data_dir)
+    daily_inputs = load_daily_inputs(base, data_dir, pool)
     sessions = sorted(panel["session"].unique())
     embargo = base.folds.embargo_days
 
@@ -90,7 +91,7 @@ def train(
             fit_end = embargoed_end(fold.train[1], sessions, embargo)
             _, _, preds = _fit_predict(cand, panel, pool, fold.train, fit_end, fold.val)
             periods = window_periods(panel, fold.val, skip_sessions=embargo)
-            _, _, metrics = score_book(preds, panel, periods, cand)
+            *_, metrics = score_book(preds, panel, periods, cand, daily_inputs=daily_inputs)
             scores.append(float(metrics.get("net_sharpe", 0.0)))
         best = int(np.argmax(scores))
         chosen = candidates[best]

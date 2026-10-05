@@ -8,7 +8,8 @@ configuration, starting flat at the capital basis. A fold boundary is a rebalanc
 liquidation.
 
 Writes ``<run>/backtest/``: metrics.json (the whole path), by_year.csv (each calendar year,
-``full_year`` marking the years the path covers entirely), book.csv (one row per period) and
+``full_year`` marking the years the path covers entirely), daily.csv (the account valued every
+trading day, which every return metric reads), book.csv (one row per decision period) and
 positions.csv (one row per symbol and period, with its P&L and costs).
 """
 
@@ -23,7 +24,13 @@ import pandas as pd
 from ml4trading.config import RunConfig
 from ml4trading.data import default_data_dir
 from ml4trading.metrics import summarize_by_year
-from ml4trading.pipeline import benchmark_returns, load_panel, score_book, window_periods
+from ml4trading.pipeline import (
+    benchmark_returns,
+    load_daily_inputs,
+    load_panel,
+    score_book,
+    window_periods,
+)
 
 
 def backtest(run_dir: Path, data_dir: Path) -> dict:
@@ -35,16 +42,21 @@ def backtest(run_dir: Path, data_dir: Path) -> dict:
         [pd.read_parquet(run_dir / "folds" / f / "predictions.parquet") for f in run["folds"]],
         ignore_index=True,
     )
-    _, panel = load_panel(cfg, data_dir)
+    pool, panel = load_panel(cfg, data_dir)
     path = (folds[0]["test"][0], folds[-1]["test"][1])
     periods = window_periods(panel, path)
-    benchmark = benchmark_returns(data_dir, cfg.K)
-    book, positions, metrics = score_book(preds, panel, periods, cfg, benchmark)
+    benchmark = benchmark_returns(data_dir)
+    daily_inputs = load_daily_inputs(cfg, data_dir, pool)
+    book, positions, daily, metrics = score_book(
+        preds, panel, periods, cfg, benchmark, daily_inputs
+    )
 
     out = run_dir / "backtest"
     out.mkdir(exist_ok=True)
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
-    summarize_by_year(book, cfg.K, positions, benchmark).to_csv(out / "by_year.csv", index=False)
+    by_year = summarize_by_year(book, cfg.K, positions, benchmark, daily)
+    by_year.to_csv(out / "by_year.csv", index=False)
+    daily.to_csv(out / "daily.csv", index=False)
     book.to_csv(out / "book.csv", index=False)
     positions.to_csv(out / "positions.csv", index=False)
     return metrics

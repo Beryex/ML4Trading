@@ -121,14 +121,6 @@ def test_a_period_nothing_can_be_traded_in_is_not_a_book_period():
     ]
 
 
-def test_weekly_sharpe_is_annualized_by_blocks_per_year():
-    from ml4trading.metrics import series_per_year
-
-    assert series_per_year(390) == 252
-    assert series_per_year(1950) == pytest.approx(50.4)
-    assert sharpe([0.02, 0.0], series_per_year(1950)) == pytest.approx(np.sqrt(50.4))
-
-
 def test_a_reinvesting_book_sizes_against_its_whole_equity():
     cfg = config.resolve("investment", {"capital": 2000.0})
     assert cfg.reinvest

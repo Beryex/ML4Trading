@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ml4trading.book import run_book
+from ml4trading.book import daily_values, run_book
 from ml4trading.config import BENCHMARK, SESSION_MINUTES, RunConfig
 from ml4trading.data import all_symbols, load_bars, load_dividends
 from ml4trading.metrics import summarize
@@ -38,11 +38,20 @@ def window_periods(panel: pd.DataFrame, window, skip_sessions: int = 0) -> list[
     return sorted(inside.loc[inside["session"] >= first, "period"].unique())
 
 
-def benchmark_returns(data_dir: Path, k: int) -> pd.Series:
-    """The benchmark's buy-and-hold return (open to next open, dividends included) per entry of
-    a book's Sharpe series: per session for K <= 390, per N-session block for K = 390 x N."""
+def load_daily_inputs(cfg: RunConfig, data_dir: Path, symbols: list[str]):
+    """What ``ml4trading.book.daily_values`` needs to value a multi-session book every day: the
+    K = 390 panel of ``symbols`` and their dividends; None for books of a session or less."""
+    if cfg.K <= SESSION_MINUTES:
+        return None
+    divs = load_dividends(data_dir, symbols)
+    return build_panel(load_bars(data_dir, symbols), SESSION_MINUTES, True, divs), divs
+
+
+def benchmark_returns(data_dir: Path) -> pd.Series:
+    """The benchmark's daily buy-and-hold return (open to next open, dividends included),
+    keyed by session -- what every book's daily returns are regressed on."""
     bars = load_bars(data_dir, [BENCHMARK])
-    panel = build_panel(bars, max(k, SESSION_MINUTES), True, load_dividends(data_dir, [BENCHMARK]))
+    panel = build_panel(bars, SESSION_MINUTES, True, load_dividends(data_dir, [BENCHMARK]))
     return panel.set_index("session")["y"]
 
 
@@ -52,8 +61,10 @@ def score_book(
     periods,
     cfg: RunConfig,
     benchmark: pd.Series | None = None,
+    daily_inputs=None,
 ):
-    """(book, positions, metrics) of ``predictions`` traded over ``periods``; trade statistics
-    always, alpha/beta when ``benchmark`` is given."""
+    """(book, positions, daily values, metrics) of ``predictions`` traded over ``periods``;
+    ``daily_inputs`` (``load_daily_inputs``) is required for a multi-session K."""
     book, positions = run_book(predictions, panel, periods, cfg)
-    return book, positions, summarize(book, cfg.K, positions, benchmark)
+    daily = daily_values(book, positions, cfg.K, *(daily_inputs or (None, None)))
+    return book, positions, daily, summarize(book, cfg.K, positions, benchmark, daily)

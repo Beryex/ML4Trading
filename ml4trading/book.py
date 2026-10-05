@@ -39,6 +39,7 @@ POSITION_COLUMNS = [
     "prev_shares",
     "shares",
     "price",
+    "exit_price",
     "gross",
     "entry_spread",
     "entry_commission",
@@ -132,6 +133,7 @@ def run_book(predictions: pd.DataFrame, panel: pd.DataFrame, periods, cfg: RunCo
                 "prev_shares": before,
                 "shares": after,
                 "price": px,
+                "exit_price": exits.get(sym) if px is not None else None,
                 "gross": 0.0,
                 "entry_spread": 0.0,
                 "entry_commission": 0.0,
@@ -193,3 +195,97 @@ def run_book(predictions: pd.DataFrame, panel: pd.DataFrame, periods, cfg: RunCo
     book = pd.DataFrame(rows)
     positions = pd.DataFrame(pos_rows, columns=POSITION_COLUMNS)
     return book, positions
+
+
+def daily_values(
+    book: pd.DataFrame,
+    positions: pd.DataFrame,
+    k: int,
+    daily_panel: pd.DataFrame | None = None,
+    dividends: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """The account valued once per trading day: one row per session with ``equity_before`` (at
+    that session's open), ``equity`` (at the next session's open), ``ret`` and ``gross_ret``
+    (the same change before the period's costs), and ``residual`` (see below).
+
+    Up to one session per period (K <= 390) this is the book itself, summed per session.
+
+    For N-session periods (K = 390 x N) the book only values the account when it trades, so
+    each block is re-marked every day: every position bought at the block's open is valued at
+    each later session's open (``daily_panel``: the K = 390 panel of the held names; a day
+    without a bar keeps the last mark) and at the block's exit price on its last day; each
+    dividend is credited on the day whose open-to-open span holds its ex-date, at the block's
+    entry price, exactly as the block itself books it; the block's costs fall on its first day.
+    The last day then lands on the book's own block-end equity; ``residual`` is whatever had to
+    be added there to make it so (zero unless a name's data skips the block's boundaries)."""
+    if k <= SESSION_MINUTES:
+        g = book.groupby("session", sort=True)
+        gross_ret = (book["gross"] / book["equity_before"].where(book["equity_before"] > 0)).fillna(
+            0.0
+        )
+        return pd.DataFrame(
+            {
+                "session": list(g.groups),
+                "equity_before": g["equity_before"].first().to_numpy(),
+                "equity": g["equity"].last().to_numpy(),
+                "ret": g["ret"].sum().to_numpy(),
+                "gross_ret": gross_ret.groupby(book["session"]).sum().to_numpy(),
+                "residual": 0.0,
+            }
+        )
+    from ml4trading.periods import dividend_returns, nyse_sessions
+
+    sessions = nyse_sessions()
+    n = k // SESSION_MINUTES
+    opens = {s: g.set_index("session")["open_px"] for s, g in daily_panel.groupby("symbol")}
+    divs = {
+        s: g
+        for s, g in (
+            dividends
+            if dividends is not None
+            else pd.DataFrame(columns=["symbol", "ex_date", "div_ret"])
+        ).groupby("symbol")
+    }
+    held_by_period = {
+        p: g[(g["shares"] != 0) & g["price"].notna()] for p, g in positions.groupby("period")
+    }
+    rows = []
+    for b in book.itertuples(index=False):
+        pos = sessions.get_loc(b.period)
+        days = sessions[pos : pos + n]
+        bounds = sessions[pos + 1 : pos + n + 1]  # each day's open-to-open end
+        costs = b.spread_cost + b.commission + b.borrow
+        change = np.zeros(len(days))  # cumulative mark-to-market P&L at each day's END
+        held = held_by_period.get(b.period)
+        for h in [] if held is None else held.itertuples(index=False):
+            px = opens.get(h.symbol, pd.Series(dtype=float))
+            marks = px.reindex(bounds[:-1]).ffill().fillna(h.price).to_numpy(dtype=float)
+            marks = np.append(marks, h.exit_price)
+            d = divs.get(h.symbol)
+            div = np.zeros(len(days))
+            if d is not None:
+                div = dividend_returns(
+                    days.to_numpy(), bounds.to_numpy(), d["ex_date"].to_numpy(), d["div_ret"]
+                )
+            change += h.shares * (marks - h.price) + h.shares * h.price * np.cumsum(div)
+        values = b.equity_before - costs + change
+        residual = b.equity - values[-1]
+        values[-1] = b.equity
+        before = np.concatenate(([b.equity_before], values[:-1]))
+        gross_step = np.diff(np.concatenate(([b.equity_before], values)))
+        gross_step[0] += costs
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ret = np.where(before > 0, values / before - 1.0, 0.0)
+            gross_ret = np.where(before > 0, gross_step / before, 0.0)
+        for j, day in enumerate(days):
+            rows.append(
+                {
+                    "session": day,
+                    "equity_before": before[j],
+                    "equity": values[j],
+                    "ret": ret[j],
+                    "gross_ret": gross_ret[j],
+                    "residual": residual if j == len(days) - 1 else 0.0,
+                }
+            )
+    return pd.DataFrame(rows)

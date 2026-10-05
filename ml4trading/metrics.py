@@ -1,16 +1,15 @@
 """Performance metrics of a book (``ml4trading.book.run_book``'s per-period frame).
 
-* Sharpe: returns per session (the sum of that session's per-period returns; for N-session
-  periods, per period), mean / std (population std), x sqrt(sessions-or-periods per year: 252,
-  or 252 / N); 0 when the std is 0. Net uses ``ret``; gross uses the gross P&L over the same
-  equity.
-* Max drawdown: the worst (wealth - running peak) / running peak along the per-period wealth
-  path cumprod(1 + ret), the peak running from the first period's wealth; -1 if wealth ever
-  reaches 0.
+* Every return-based metric reads the account's DAILY value (``ml4trading.book.daily_values``),
+  whatever the method's trading frequency, so all methods are measured the same way.
+* Sharpe: daily returns, mean / std (population std) x sqrt(252), no risk-free rate; 0 when the
+  std is 0. Net uses ``ret``; gross the same change before costs.
+* Max drawdown: the worst (value - running peak) / running peak of the daily account value,
+  the peak running from the first day's; -1 if the value ever reaches 0.
 * Cumulative return: final equity / starting equity - 1; net profit: the same in dollars.
-* Alpha / beta against a benchmark's returns over the same periods (VOO): the OLS of the
-  book's Sharpe series on the benchmark's; alpha is the intercept x periods per year (the
-  return left after the market exposure beta), with its t-statistic.
+* Alpha / beta against the benchmark's daily returns (VOO, open to next open with dividends):
+  the OLS of the account's daily returns on them; alpha is the intercept x 252 (the return left
+  after the market exposure beta), with its t-statistic.
 * Trades (``trade_stats``): a trade runs from the period a symbol's position opens from flat
   (or flips sign) to the period it is flat again (or flips); adds and trims inside it belong to
   it. Its P&L is its gross P&L minus every entry and exit cost and borrow fee it incurred. The
@@ -31,11 +30,6 @@ def sharpe(returns, per_year: float = TRADING_DAYS_PER_YEAR) -> float:
     if r.size and np.std(r) > 0:
         return float(np.mean(r) / np.std(r) * np.sqrt(per_year))
     return 0.0
-
-
-def series_per_year(k: int) -> float:
-    """How many of the Sharpe series' returns make a year: 252 sessions, or 252 / N blocks."""
-    return TRADING_DAYS_PER_YEAR / (k // SESSION_MINUTES) if k > SESSION_MINUTES else 252.0
 
 
 def max_drawdown(wealth) -> float:
@@ -123,43 +117,51 @@ def summarize(
     k: int = SESSION_MINUTES,
     positions: pd.DataFrame | None = None,
     benchmark: pd.Series | None = None,
+    daily: pd.DataFrame | None = None,
 ) -> dict:
-    """The metrics of a book whose periods are ``k`` minutes long; trade statistics when
-    ``positions`` is given, alpha/beta when ``benchmark`` (returns keyed like the book's
-    ``session`` column) is."""
+    """The metrics of a book whose periods are ``k`` minutes long. Every return-based metric
+    reads the DAILY account value (``ml4trading.book.daily_values``; derived from the book when
+    a period is at most a session, required for longer periods), so methods that trade at
+    different frequencies are measured the same way. Trade statistics when ``positions`` is
+    given, alpha/beta when ``benchmark`` (daily returns keyed by session) is."""
     if book.empty:
-        return {"n_periods": 0}
-    per_year = series_per_year(k)
-    daily = book.groupby("session", sort=True)
-    net_daily = daily["ret"].sum()
-    gross_ret = book["gross"] / book["equity_before"].where(book["equity_before"] > 0)
-    gross_daily = gross_ret.fillna(0.0).groupby(book["session"]).sum()
-    wealth = np.cumprod(1.0 + book["ret"].to_numpy(dtype=float))
-    start_equity = float(book["equity_before"].iloc[0])
-    end_equity = float(book["equity"].iloc[-1])
-    n_periods = int(net_daily.size)
-    years = n_periods / per_year
+        return {"n_periods": 0, "n_days": 0}
+    if daily is None:
+        if k > SESSION_MINUTES:
+            raise ValueError(f"K={k}: a multi-session book needs its daily values")
+        from ml4trading.book import daily_values
+
+        daily = daily_values(book, positions, k)
+    net = daily.set_index("session")["ret"]
+    gross = daily.set_index("session")["gross_ret"]
+    start_equity = float(daily["equity_before"].iloc[0])
+    end_equity = float(daily["equity"].iloc[-1])
+    wealth = daily["equity"].to_numpy(dtype=float) / start_equity
+    n_days = int(len(daily))
+    years = n_days / TRADING_DAYS_PER_YEAR
     growth = end_equity / start_equity
     out = {
-        "start": str(book["session"].iloc[0].date()),
-        "end": str(book["session"].iloc[-1].date()),
-        "n_periods": n_periods,
-        "net_sharpe": sharpe(net_daily, per_year),
-        "gross_sharpe": sharpe(gross_daily, per_year),
+        "start": str(daily["session"].iloc[0].date()),
+        "end": str(daily["session"].iloc[-1].date()),
+        "n_periods": int(len(book)),
+        "n_days": n_days,
+        "net_sharpe": sharpe(net),
+        "gross_sharpe": sharpe(gross),
         "max_drawdown": max_drawdown(wealth),
         "net_profit": end_equity - start_equity,
         "cumulative_return": growth - 1.0,
         "annualized_return": growth ** (1.0 / years) - 1.0 if years > 0 and growth > 0 else -1.0,
-        "annualized_volatility": float(np.std(net_daily) * np.sqrt(per_year)),
+        "annualized_volatility": float(np.std(net) * np.sqrt(TRADING_DAYS_PER_YEAR)),
         "start_equity": start_equity,
         "end_equity": end_equity,
         "total_spread_cost": float(book["spread_cost"].sum()),
         "total_commission": float(book["commission"].sum()),
         "total_borrow": float(book["borrow"].sum()),
         "total_traded_notional": float(book["traded_notional"].sum()),
+        "max_daily_residual": float(daily["residual"].abs().max()),
     }
     if benchmark is not None:
-        out.update(alpha_beta(net_daily, benchmark, per_year))
+        out.update(alpha_beta(net, benchmark, TRADING_DAYS_PER_YEAR))
     if positions is not None:
         out.update(trade_stats(positions))
     return out
@@ -170,31 +172,28 @@ def summarize_by_year(
     k: int,
     positions: pd.DataFrame,
     benchmark: pd.Series | None = None,
+    daily: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """One row per calendar year of the book: ``summarize`` over that year's periods (its
-    profit, Sharpe, drawdown, alpha/beta), with the trade statistics of the trades that
-    CLOSED in it, and ``full_year`` -- whether the book covers the year's first and last NYSE
-    sessions."""
+    """One row per calendar year: ``summarize`` over that year's days (its profit, Sharpe,
+    drawdown, alpha/beta) and the costs of the periods that start in it, with the trade
+    statistics of the trades that CLOSED in it, and ``full_year`` -- whether the account was
+    valued on the year's first and last NYSE sessions."""
+    from ml4trading.book import daily_values
     from ml4trading.periods import nyse_sessions
 
+    if daily is None:
+        daily = daily_values(book, positions, k)
     sessions = nyse_sessions()
     done, _ = trades(positions)
-    first, last = book["period"].min(), book["period"].max()
+    first, last = daily["session"].min(), daily["session"].max()
     rows = []
-    for year, part in book.groupby(book["session"].dt.year, sort=True):
+    for year, days in daily.groupby(daily["session"].dt.year, sort=True):
         in_year = sessions[sessions.year == year]
+        part = book[book["session"].dt.year == year].reset_index(drop=True)
         row = {"year": int(year)}
-        row.update(summarize(part.reset_index(drop=True), k, None, benchmark))
+        row.update(summarize(part, k, None, benchmark, days.reset_index(drop=True)))
         row.update(_trade_summary(done[done["end"].dt.year == year], 0))
         del row["open_trades_at_end"]
-        slack = _block_slack(k)
-        row["full_year"] = bool(first <= in_year[0] + slack and in_year[-1] <= last + slack)
+        row["full_year"] = bool(first <= in_year[0] and in_year[-1] <= last)
         rows.append(row)
     return pd.DataFrame(rows)
-
-
-def _block_slack(k: int) -> pd.Timedelta:
-    """N-session blocks do not align with years: the year's first sessions may sit in a block
-    keyed in the previous year, and its last block may start up to N - 1 sessions before the
-    year's end -- a book within that slack of both ends covers the year."""
-    return pd.Timedelta(days=0) if k <= SESSION_MINUTES else pd.Timedelta(days=14)
