@@ -41,8 +41,9 @@ pytest
 - **Trader** (`trader.py`). Per period, the top-N predictions by magnitude (long or short),
   weighted proportionally to the prediction, capped per name and in total, then a cost gate:
   a name is traded only if its predicted return beats its estimated round-trip cost.
-- **Shares and book** (`sizing.py`, `book.py`). Weights become whole shares within the budget
-  `min(capital, equity)`, with a switching-friction rule that avoids trades whose cost exceeds
+- **Shares and book** (`sizing.py`, `book.py`). Weights become whole shares within the account's
+  equity (gains are reinvested; `--set reinvest=false` caps every period at the starting
+  capital instead), with a switching-friction rule that avoids trades whose cost exceeds
   the tracking error they remove. Entries are modelled as passive limit orders (no spread),
   exits as market orders (half the quoted spread); every order pays a per-share commission
   with a minimum; shorts pay a borrow fee and owe dividends. The defaults: $20,000 capital, a
@@ -65,11 +66,8 @@ next open to exit at; `runs/<method>/backtest/metrics.json`):
 
 | method | net Sharpe | net profit | cumulative return | max drawdown | alpha vs VOO | beta |
 |---|---:|---:|---:|---:|---:|---:|
-| `investment` (VOO) | 0.772 | $20,616 | +103.1 % | −31.8 % | −1.0 % | 0.79 |
-| `investment_tech` (QQQ) | 0.859 | $27,831 | +139.2 % | −26.9 % | +1.3 % | 0.82 |
-
-Both size against `min(capital, equity)`, so once equity grows past the $20,000 basis the
-excess stays in cash -- which is why the VOO book's beta to VOO is 0.79, not 1.
+| `investment` (VOO) | 0.852 | $31,924 | +159.6 % | −31.9 % | −0.0 % | 0.99 |
+| `investment_tech` (QQQ) | 0.895 | $49,006 | +245.0 % | −36.6 % | +2.5 % | 1.17 |
 
 ## Adding a model
 

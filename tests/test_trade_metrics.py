@@ -96,7 +96,7 @@ def test_the_book_records_every_symbol_it_touches():
     )
     panel["y"] = panel["exit_px"] / panel["open_px"] - 1
     preds = pd.DataFrame({"period": days[:3], "symbol": "A", "prediction": [0.05, 0.0, 0.0]})
-    cfg = config.resolve("investment", {"capital": 2000.0})
+    cfg = config.resolve("investment", {"capital": 2000.0, "reinvest": False})
     book, positions = run_book(preds, panel, days[:3], cfg)
     assert list(positions["shares"]) == [20.0, 0.0]  # bought, then sold when the signal is 0
     s = trade_stats(positions)

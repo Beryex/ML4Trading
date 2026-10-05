@@ -86,7 +86,10 @@ class RunConfig:
     trader: TraderConfig = field(default_factory=TraderConfig)
     folds: FoldConfig = field(default_factory=FoldConfig)
     costs: CostConfig = field(default_factory=CostConfig)
-    capital: float = 20000.0  # the capital basis: each period sizes min(capital, equity)
+    capital: float = 20000.0  # the starting cash
+    # True: every period sizes against the whole equity, so gains are reinvested. False: against
+    # min(capital, equity) -- a fixed capital basis whose gains above it stay in cash.
+    reinvest: bool = True
 
     @property
     def hold_overnight(self) -> bool:
@@ -106,6 +109,7 @@ class RunConfig:
             folds=_build(FoldConfig, d["folds"]),
             costs=_build(CostConfig, d["costs"]),
             capital=float(d["capital"]),
+            reinvest=bool(d["reinvest"]),
         )
 
 
@@ -160,7 +164,7 @@ def apply_overrides(cfg: RunConfig, overrides: dict[str, Any]) -> RunConfig:
     for key, value in overrides.items():
         section, _, name = key.partition(".")
         if not name:
-            if section not in ("K", "capital"):
+            if section not in ("K", "capital", "reinvest"):
                 raise ValueError(f"unknown top-level key {key!r}")
             cfg = replace(cfg, **{section: value})
         elif section == "model":

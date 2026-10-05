@@ -6,7 +6,9 @@ and the previous share book. At period t:
 1. TRADEABLE names are those with an entry price (open_px) and an exit price this period. The
    trader turns their predictions into target weights (``ml4trading.trader``).
 2. Held names that are not tradeable this period are CARRIED (``ml4trading.sizing``).
-3. Shares are sized against the budget min(capital, equity) at the entry prices.
+3. Shares are sized at the entry prices against the budget: the whole equity when the run
+   reinvests (the default), else min(capital, equity) -- gains above the capital basis stay in
+   cash.
 4. Costs: each name's change of shares is split into entry/exit legs at its entry price
    (``ml4trading.costs``); short notional pays a borrow fee per period.
 5. Gross P&L: shares x (exit - entry) + shares x entry x div_ret (longs receive dividends,
@@ -92,6 +94,7 @@ def run_book(predictions: pd.DataFrame, panel: pd.DataFrame, periods, cfg: RunCo
         prices = dict(zip(m["symbol"], m["open_px"].astype(float), strict=True))
         exits = dict(zip(m["symbol"], m["exit_px"].astype(float), strict=True))
         divs = dict(zip(m["symbol"], m["div_ret"].astype(float), strict=True))
+        budget = equity if cfg.reinvest else min(cfg.capital, equity)
         if equity <= 0:
             shares: dict = {}
         else:
@@ -103,14 +106,14 @@ def run_book(predictions: pd.DataFrame, panel: pd.DataFrame, periods, cfg: RunCo
                     s.sort_values("symbol", kind="stable"),
                     trader=trader,
                     costs=costs,
-                    capital=cfg.capital,
+                    capital=budget if cfg.reinvest else cfg.capital,
                     hold_overnight=cfg.hold_overnight,
                 )
             carried = {sym: last_price.get(sym, np.nan) for sym in prev if sym not in prices}
             shares = size_shares(
                 weights,
                 prices,
-                min(cfg.capital, equity),
+                budget,
                 prev,
                 carried,
                 trader=trader,

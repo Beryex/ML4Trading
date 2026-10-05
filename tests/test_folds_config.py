@@ -58,5 +58,7 @@ def test_grid_expands_every_combination():
 
 
 def test_round_trip_through_dict():
-    cfg = config.resolve("investment", {"capital": 10000.0, "costs.spread_bps": 2.0})
+    cfg = config.resolve(
+        "investment", {"capital": 10000.0, "reinvest": False, "costs.spread_bps": 2.0}
+    )
     assert config.RunConfig.from_dict(cfg.to_dict()) == cfg
