@@ -46,6 +46,15 @@ close. Half days have 7 bars, full days 13.
   5 more have gaps; 423 have the full history.
 - **One large company is missing:** Berkshire Hathaway (its class-B ticker could not be mapped
   when the universe was built).
+- **One corrected scale break.** CRWD's bars from 2021-06-24 to 2026-06-22 came from the vendor
+  on the pre-split scale of its 4-for-1 split of 2026-06-23, while the bars around them were
+  split-adjusted; their prices are divided by 4 and volumes multiplied by 4 (verified against a
+  later, consistently adjusted download). `MANIFEST.json` records the correction.
+- **Unverified suspect series.** A scan for overnight moves larger than 1.5x flags three series we
+  could not check against a second source: HDB (prices double and volume halves on 2020-12-31, the
+  signature of a split-scale break), WBD (levels inconsistent between 2018 and 2022), and MRNA
+  (an opening price of $35.88 on 2020-02-27, likely a bad print). None of the baselines ever
+  holds HDB or WBD, or MRNA around that date; treat these series with care in learned models.
 - **No closing auction.** The last bar's close is the last regular trade before 16:00, not the
   official closing-auction price.
 - **Noisy dividends.** The dividend series was estimated from adjusted vs. unadjusted daily

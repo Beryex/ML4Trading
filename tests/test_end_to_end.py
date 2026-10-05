@@ -127,3 +127,15 @@ def test_each_single_etf_baseline_holds_only_its_etf(data_dir, tmp_path, method,
     backtest(run, data_dir)
     positions = pd.read_csv(run / "backtest" / "positions.csv")
     assert set(positions["symbol"]) == {etf}
+
+
+def test_the_account_value_chart_is_drawn(data_dir, tmp_path):
+    pytest.importorskip("matplotlib")
+    from ml4trading.plot import account_values, plot_runs
+
+    run = train("investment", tmp_path / "run", data_dir, overrides=SHORT_FOLDS)
+    backtest(run, data_dir)
+    values = account_values(run)
+    assert values.iloc[0] == pytest.approx(20_000.0)  # starts from the capital
+    out = plot_runs([(run, "VOO"), (run, "VOO again")], tmp_path / "chart.png", "test")
+    assert out.exists() and out.stat().st_size > 10_000
