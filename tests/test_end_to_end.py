@@ -117,3 +117,13 @@ def test_manifest_verification_detects_a_changed_file(data_dir):
     path = data_dir / "bars_30min" / "AAA.parquet"
     path.write_bytes(path.read_bytes() + b"x")
     assert verify(data_dir) == ["bars_30min/AAA.parquet"]
+
+
+@pytest.mark.parametrize("method, etf", [("investment", "VOO"), ("investment_tech", "QQQ")])
+def test_each_single_etf_baseline_holds_only_its_etf(data_dir, tmp_path, method, etf):
+    cfg = config.resolve(method)
+    assert (cfg.K, cfg.hold_overnight, cfg.trader.number_of_symbols_to_buy) == (390, True, 1)
+    run = train(method, tmp_path / "run", data_dir, overrides=SHORT_FOLDS)
+    backtest(run, data_dir)
+    positions = pd.read_csv(run / "backtest" / "positions.csv")
+    assert set(positions["symbol"]) == {etf}

@@ -1,8 +1,9 @@
 """Constant portfolios: a fixed predicted return per symbol, nothing fitted.
 
-``investment`` predicts +1 % for VOO every period. Under the ``proportional`` trader a single
-positive name takes the whole (capped) book whatever the value, so the number only has to clear
-the cost gate: the method is 100 % VOO, bought once and held -- the buy-and-hold baseline.
+``investment`` predicts +1 % for VOO (S&P 500) every period, ``investment_tech`` the same for
+QQQ (Nasdaq-100). Under the ``proportional`` trader a single positive name takes the whole
+(capped) book whatever the value, so the number only has to clear the cost gate: each method is
+100 % of its ETF, bought and held -- a buy-and-hold baseline.
 """
 
 from __future__ import annotations
@@ -37,3 +38,8 @@ class ConstantPortfolio(Model):
 @register_model("investment")
 class Investment(ConstantPortfolio):
     predictions = {"VOO": 0.01}
+
+
+@register_model("investment_tech")
+class InvestmentTech(ConstantPortfolio):
+    predictions = {"QQQ": 0.01}

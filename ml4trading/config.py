@@ -108,15 +108,20 @@ class RunConfig:
         )
 
 
+#: A single-ETF buy-and-hold: one name, the whole (1.0-capped) book, held overnight.
+_SINGLE_ETF_HOLD: dict[str, Any] = {
+    "K": 390,
+    "model": {"hold_overnight": True},
+    "selector": {"name": "liquidity"},
+    "trader": {"name": "proportional", "number_of_symbols_to_buy": 1, "max_symbol_weight": 1.0},
+}
+
 #: Each method's own defaults over the class defaults above.
 METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
-    # 100 % VOO, bought and held: the buy-and-hold baseline every learned model is compared to.
-    "investment": {
-        "K": 390,
-        "model": {"hold_overnight": True},
-        "selector": {"name": "liquidity"},
-        "trader": {"name": "proportional", "number_of_symbols_to_buy": 1, "max_symbol_weight": 1.0},
-    },
+    # 100 % VOO (S&P 500): the buy-and-hold baseline every learned model is compared to.
+    "investment": _SINGLE_ETF_HOLD,
+    # 100 % QQQ (Nasdaq-100): the technology-heavy buy-and-hold baseline.
+    "investment_tech": _SINGLE_ETF_HOLD,
 }
 
 

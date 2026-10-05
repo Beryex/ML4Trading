@@ -33,7 +33,13 @@ def make_bars(symbol_seed: int, start: str, end: str, price0: float = 100.0) -> 
 
 def write_dataset(root: Path, start="2021-01-04", end="2021-12-31") -> Path:
     (root / "bars_30min").mkdir(parents=True)
-    symbols = {"AAA": (1, 50.0), "BBB": (2, 120.0), "CCC": (3, 30.0), "VOO": (4, 350.0)}
+    symbols = {
+        "AAA": (1, 50.0),
+        "BBB": (2, 120.0),
+        "CCC": (3, 30.0),
+        "VOO": (4, 350.0),
+        "QQQ": (5, 300.0),
+    }
     files = {}
     for sym, (seed, p0) in symbols.items():
         path = root / "bars_30min" / f"{sym}.parquet"
@@ -51,7 +57,7 @@ def write_dataset(root: Path, start="2021-01-04", end="2021-12-31") -> Path:
     universe = {
         "as_of": "2021-12-31",
         "symbols": ["AAA", "BBB", "CCC"],
-        "etfs": ["VOO"],
+        "etfs": ["VOO", "QQQ"],
         "market_cap_usd": {"AAA": 3e11, "BBB": 2e11, "CCC": 1e11},
     }
     (root / "universe.json").write_text(json.dumps(universe))

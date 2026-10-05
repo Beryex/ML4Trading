@@ -52,16 +52,21 @@ pytest
 All knobs and their defaults live in `ml4trading/config.py`; `--set key=value` overrides one
 (`--set capital=10000`, `--set costs.spread_bps=2`).
 
-## The baseline
+## The baselines
 
-`investment` holds 100 % VOO (an S&P 500 index ETF) — the buy-and-hold benchmark a learned
-model has to beat. Measured with the defaults above on the full dataset (test path 2020-01-02
-to 2026-08-28, 1,673 sessions -- the data's last session, 2026-08-31, has no next open to exit
-at; `runs/investment/backtest/metrics.json`):
+Two buy-and-hold benchmarks a learned model has to beat: `investment` holds 100 % VOO (S&P 500)
+and `investment_tech` 100 % QQQ (Nasdaq-100). Measured with the defaults above on the full
+dataset (test path 2020-01-02 to 2026-08-28, 1,673 sessions -- the data's last session,
+2026-08-31, has no next open to exit at; `runs/<method>/backtest/metrics.json`):
 
-| net Sharpe | max drawdown | cumulative return | annualized return | annualized volatility |
-|---:|---:|---:|---:|---:|
-| 0.785 | −29.4 % | +95.7 % | 10.6 % | 14.2 % |
+| method | net Sharpe | max drawdown | cumulative return | annualized return | annualized volatility |
+|---|---:|---:|---:|---:|---:|
+| `investment` (VOO) | 0.785 | −29.4 % | +95.7 % | 10.6 % | 14.2 % |
+| `investment_tech` (QQQ) | 0.839 | −25.8 % | +124.0 % | 12.9 % | 16.0 % |
+
+Both size against `min(capital, equity)`, so once equity grows past the $2,000 basis the excess
+stays in cash, so the books' drawdowns are shallower than the ETFs' own (same path,
+open-to-open with dividends: VOO −32.1 %, QQQ −36.7 %).
 
 ## Adding a model
 
