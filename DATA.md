@@ -46,8 +46,8 @@ close. Half days have 7 bars, full days 13.
   5 more have gaps; 423 have the full history.
 - **One large company is missing:** Berkshire Hathaway (its class-B ticker could not be mapped
   when the universe was built).
-- **One corrected scale break.** CRWD's bars from 2021-06-24 to 2026-06-22 came from the vendor
-  on the pre-split scale of its 4-for-1 split of 2026-06-23, while the bars around them were
+- **One corrected scale break.** CRWD's bars from 2021-06-24 to 2026-06-22 were stored on the
+  pre-split scale of its 4-for-1 split of 2026-06-23, while the bars around them were
   split-adjusted; their prices are divided by 4 and volumes multiplied by 4 (verified against a
   later, consistently adjusted download). `MANIFEST.json` records the correction.
 - **Unverified suspect series.** A scan for overnight moves larger than 1.5x flags three series we
