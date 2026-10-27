@@ -36,8 +36,12 @@ pytest
   validation months that follow; the best one is refitted on the 36 months before `B` and
   predicts month `B`. Fits stop 5 sessions before whatever they are scored on, because a label
   looks one period ahead. The test months, concatenated, are the result.
+- **Frames and models** (`models/`). A run builds its method's frames once -- the labelled
+  panel over the method's symbol pool and, for a learned model, its features (`features/`) row
+  by row -- and every fold reaches the model only as a fit window and a predict window over them.
 - **Universe** (`selector.py`). Per fold, symbols with enough labelled sessions and a median
-  dollar volume of at least $1M, the 100 most liquid kept.
+  dollar volume of at least $1M, the 100 most liquid kept. Only they are traded; a learned model
+  fits on every stock of its pool.
 - **Trader** (`trader.py`). Per period, the top-N predictions by magnitude (long or short),
   weighted proportionally to the prediction, capped per name and in total, then a cost gate:
   a name is traded only if its predicted return beats its estimated round-trip cost.
@@ -69,28 +73,74 @@ next open to exit at; `runs/<method>/backtest/metrics.json`):
 | `investment` (VOO) | 0.852 | $31,924 | +159.6 % | −31.9 % | −0.0 % | 0.99 |
 | `investment_tech` (QQQ) | 0.895 | $49,006 | +245.0 % | −36.6 % | +2.5 % | 1.17 |
 
+## The learned models
+
+`linear` and `nonlinear` predict each stock's next open-to-open return (K = 390, held overnight)
+from about 190 daily features, refitted every fold on every stock of the pool; the fold's
+universe decides what is traded.
+
+- **Features** (`ml4trading/features/`): the feature set of
+  [ML4Investment](https://github.com/Beryex/ML4Investment) (MIT), computed on the 30-minute
+  bars -- intraday statistics aggregated per session (returns, ranges, VWAP deviation,
+  first- and last-hour moves, volume ratios), daily technical indicators (RSI, MACD,
+  stochastics, ADX, CCI, MFI, Bollinger), lags, seven cross-sectional ranks, VOO's and QQQ's
+  own features, calendar features and a stock code. The row of session *d* holds what was known
+  at *d*'s open: the features of the stock's previous session. The package docstring lists every
+  adaptation; the features are built once per run (about a minute on the full dataset).
+- **Split-adjusted levels are left out.** Prices and volumes are split-adjusted back from the
+  end of the data, so a stock's past price or volume LEVEL reveals whether it split later --
+  which companies do after their shares have risen. Every feature that moves when one stock's
+  prices are multiplied and its volume divided by the same factor is dropped (58 of
+  ML4Investment's per-stock features: price and volume levels, ATR and MACD in price units,
+  OBV, ranges, ratios over such a level); a test holds the list equal to that rule.
+- **`linear`**: an elastic net on the standardized features. A missing value is replaced by the
+  median of its feature over the same session's stocks; the penalty is a fraction `alpha_ratio`
+  of the smallest one that zeroes every coefficient (scikit-learn's `ElasticNetCV` convention).
+  The stock code is not used.
+- **`nonlinear`**: LightGBM, by default on the absolute error as in ML4Investment, with the stock
+  code as a categorical feature; missing values go in as they are. Fits are deterministic (a
+  fixed seed and thread count).
+- **Grids** (`grids/linear.yaml`, `grids/nonlinear.yaml`) are searched per fold on validation net
+  Sharpe like any method's. Each fold also records every candidate's out-of-sample R², against
+  the constant fitted on its training rows (`candidate_val_r2` in `fold.json`); it is never
+  ranked on.
+
+```bash
+python -m ml4trading.train --method linear --grid grids/linear.yaml --out runs/linear
+python -m ml4trading.backtest --run runs/linear
+```
+
 ## Adding a model
 
-1. Subclass `ml4trading.models.Model` and implement `fit(panel, window)` and
-   `predict(panel, window)` (the contract is in `ml4trading/models/base.py`): a prediction for
-   period *t* may only use data from periods before *t*.
+1. Subclass `ml4trading.models.Model` and implement `fit_predict_fold(frames, fit_window,
+   predict_window)` (the contract is in `ml4trading/models/base.py`). `frames`, built once per
+   run by `build_frames`, holds the labelled panel over the model's pool and, for a model that
+   needs them, features row-aligned with it; fit on the labelled rows inside `fit_window` and
+   predict the periods of `predict_window`, where a prediction for period *t* may only use what
+   was known at *t*'s open. A model on the features subclasses
+   `ml4trading.models.learned.base.LearnedModel` and implements only `_fit`.
 2. Register it with `@register_model("my_model")`, import its module in
    `ml4trading/models/__init__.py`, and add its defaults to `METHOD_DEFAULTS` in
    `ml4trading/config.py` (`K`, `model.hold_overnight`, and any trader overrides).
-3. Check causality: `ml4trading.testing.assert_causal(model, panel, window)` scrambles every row
-   from period *t* on and fails if the prediction for *t* changes.
+3. Check causality: `ml4trading.testing.assert_causal(model, bars, dividends, K, pool,
+   fit_window, predict_window)` scrambles every bar from period *t* on, rebuilds the frames, fits
+   and predicts again, and fails if the prediction for *t* changes.
 4. Search hyperparameters per fold with a grid file — dotted `model.*` keys to lists:
 
    ```yaml
    model.alpha: [0.1, 1.0, 10.0]
    ```
 
-   `python -m ml4trading.train --method my_model --grid grid.yaml --out runs/my_model`
+   `python -m ml4trading.train --method my_model --grid grid.yaml --out runs/my_model`. A key
+   the frames are built from (`Model.FRAME_PARAMS`, such as `model.hold_overnight`) is fixed for
+   the run and cannot be searched.
 
 ## Repository layout
 
 ```
-ml4trading/   the package (one module per stage above, models/ for the methods)
+ml4trading/   the package (one module per stage above, models/ for the methods, features/ for
+              the learned models' inputs)
+grids/        the learned models' per-fold hyperparameter grids
 tests/        unit and end-to-end tests on a synthetic dataset (no real data needed)
 DATA.md       the dataset card: contents, construction, known limitations
 ```
