@@ -14,8 +14,9 @@ boundary B (calendar: ``ml4trading.folds``):
    trailing ``train_months`` before B), fit on it (embargoed the same way), and predict the
    test month, again keeping the universe's predictions.
 3. The fold is written to ``<out>/folds/<FYYYY-MM>/``: fold.json (windows, candidate scores,
-   the choice), universe.json, predictions.parquet and, for a model that fits one, the fitted
-   estimator under model/.
+   the choice, and each candidate's out-of-sample R² on its scored validation rows -- recorded,
+   never ranked on; null for a model that fits no loss), universe.json, predictions.parquet and,
+   for a model that fits one, the fitted estimator under model/.
 
 A model fits on every symbol of its pool; the universe only decides what is traded. The grid
 file maps dotted ``model.*`` keys to lists of values; only model parameters are searched per
@@ -40,6 +41,7 @@ from ml4trading.data import default_data_dir
 from ml4trading.folds import embargoed_end, fold_at, fold_boundaries
 from ml4trading.models import FoldResult, Frames, get_model
 from ml4trading.models.base import empty_predictions
+from ml4trading.models.learned.losses import oos_r2
 from ml4trading.pipeline import load_daily_inputs, load_frames, score_book, window_periods
 from ml4trading.selector import select_universe
 
@@ -58,6 +60,18 @@ def _fit_predict(
     result = get_model(cfg.method)(**cfg.model).fit_predict_fold(frames, fit_window, predict_window)
     preds = result.predictions
     return universe, result, preds[preds["symbol"].isin(set(universe))].reset_index(drop=True)
+
+
+def _val_r2(result: FoldResult | None, preds: pd.DataFrame, panel, periods) -> float | None:
+    """The out-of-sample R² of the universe's predictions over the scored ``periods`` against
+    the fit's baseline, under the fit's loss; None for a model that fits no loss."""
+    if result is None or result.loss is None:
+        return None
+    scored = preds[preds["period"].isin(set(periods))].merge(
+        panel[["period", "symbol", "y"]], on=["period", "symbol"]
+    )
+    scored = scored[np.isfinite(scored["y"].to_numpy(dtype=float))]
+    return oos_r2(scored["y"], scored["prediction"], result.baseline_prediction, result.loss)
 
 
 def _check_grid(method: str, grid: dict | None) -> None:
@@ -101,13 +115,14 @@ def train(
     t0 = time.time()
     for b in fold_boundaries(base.folds):
         fold = fold_at(b, base.folds)
-        scores = []
+        scores, r2s = [], []
         for cand in candidates:
             fit_end = embargoed_end(fold.train[1], sessions, embargo)
-            _, _, preds = _fit_predict(cand, frames, pool, fold.train, fit_end, fold.val)
+            _, result, preds = _fit_predict(cand, frames, pool, fold.train, fit_end, fold.val)
             periods = window_periods(panel, fold.val, skip_sessions=embargo)
             *_, metrics = score_book(preds, panel, periods, cand, daily_inputs=daily_inputs)
             scores.append(float(metrics.get("net_sharpe", 0.0)))
+            r2s.append(_val_r2(result, preds, panel, periods))
         best = int(np.argmax(scores))
         chosen = candidates[best]
         fit_end = embargoed_end(fold.deploy[1], sessions, embargo)
@@ -121,6 +136,7 @@ def train(
             **fold.to_dict(),
             "fit_end": None if fit_end is None else str(pd.Timestamp(fit_end).date()),
             "candidate_val_net_sharpe": scores,
+            "candidate_val_r2": r2s,
             "chosen": best,
             "model_params": chosen.model,
             "n_universe": len(universe),

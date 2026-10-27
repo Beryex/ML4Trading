@@ -130,6 +130,38 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
     # Last week's change as the forecast (reverse: its negative), rebalanced once per 5-session
     # block, the default trader on top. ``--set K=390`` is the daily version.
     "momentum": {"K": 1950, "model": {"hold_overnight": True, "reverse": False}},
+    # An elastic net on the ML4Investment features (ml4trading.models.learned.linear).
+    "linear": {
+        "K": 390,
+        "model": {
+            "hold_overnight": True,
+            "alpha_ratio": 0.01,  # a point of grids/linear.yaml
+            "l1_ratio": 0.5,  # scikit-learn ElasticNet's default
+            "max_iter": 1000,  # scikit-learn ElasticNet's default
+        },
+    },
+    # LightGBM on the same features (ml4trading.models.learned.nonlinear): LightGBM 4's own
+    # defaults for every boosting parameter.
+    "nonlinear": {
+        "K": 390,
+        "model": {
+            "hold_overnight": True,
+            "loss": "l1",  # ML4Investment's TRAIN_OBJECTIVE, regression_l1
+            "num_leaves": 31,
+            "min_data_in_leaf": 20,
+            "learning_rate": 0.1,
+            "n_estimators": 100,
+            "feature_fraction": 1.0,
+            "bagging_fraction": 1.0,
+            "bagging_freq": 0,
+            "lambda_l1": 0.0,
+            "lambda_l2": 0.0,
+            "max_depth": -1,
+            "min_gain_to_split": 0.0,
+            "min_sum_hessian_in_leaf": 0.001,
+            "max_bin": 255,
+        },
+    },
 }
 
 
