@@ -3,20 +3,24 @@
 LightGBM splits on missing values itself, so the features go in as they are. A fit reproduces
 exactly only with ``deterministic`` and ``force_row_wise`` (ML4Investment's fixed training
 configuration) and the same thread count, which is therefore fixed here, not read from the
-machine.
+machine. LightGBM is imported only when a booster is trained or loaded: it needs an OpenMP
+runtime (on macOS, ``brew install libomp``) that the other methods do not.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
 from ml4trading.models.learned.base import FitArtifact, LearnedModel
 from ml4trading.models.learned.losses import LOSSES
 from ml4trading.models.registry import register_model
+
+if TYPE_CHECKING:
+    import lightgbm as lgb
 
 NUM_THREADS = 8
 CATEGORICAL = "stock_id"
@@ -63,6 +67,8 @@ class LGBMArtifact(FitArtifact):
 
     @classmethod
     def load(cls, directory: Path) -> LGBMArtifact:
+        import lightgbm as lgb
+
         return cls(lgb.Booster(model_file=str(Path(directory) / cls.FILENAME)))
 
 
@@ -80,6 +86,8 @@ class NonlinearModel(LearnedModel):
         return str(self.params["loss"])
 
     def _fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray) -> LGBMArtifact:
+        import lightgbm as lgb
+
         params = {
             "objective": OBJECTIVES[self.loss],
             **{k: self.params[k] for k in BOOSTING_PARAMS},

@@ -1,3 +1,6 @@
+import subprocess
+import sys
+
 import pandas as pd
 import pytest
 
@@ -24,3 +27,10 @@ def test_frames_panel_equals_load_panel(data_dir, method):
     assert pool == panel_pool
     pd.testing.assert_frame_equal(frames.panel, panel)
     assert frames.X is None
+
+
+def test_importing_the_package_does_not_load_lightgbm():
+    # lightgbm needs an OpenMP runtime some machines lack: only the nonlinear model may load it
+    code = "import sys, ml4trading.train, ml4trading.backtest; print('lightgbm' in sys.modules)"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False"

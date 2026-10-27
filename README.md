@@ -12,6 +12,7 @@ and judged only on the month after its training data ends.
 
 ```bash
 uv venv --python 3.12 && uv pip install -e ".[dev]"   # or: pip install -e ".[dev]"
+# the nonlinear model's LightGBM needs OpenMP; on macOS: brew install libomp
 # put the dataset under data/ (see DATA.md), then
 python -m ml4trading.data verify
 python -m ml4trading.train --method investment --out runs/investment
