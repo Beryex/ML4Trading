@@ -112,6 +112,45 @@ python -m ml4trading.train --method linear --grid grids/linear.yaml --out runs/l
 python -m ml4trading.backtest --run runs/linear
 ```
 
+### Validation diagnostics
+
+A fold's validation Sharpe says how a candidate did, not why. For every fold, `train` also keeps
+what the chosen candidate's validation pass produced (nothing is refitted):
+
+- `val/predictions.parquet`: the scored validation rows -- `period, symbol, prediction`, the
+  realized return `y` and the `label` the fit was trained on (rows without a realized return are
+  not scored);
+- `val_diagnostics` in `fold.json`: that validation book taken apart -- the per-period
+  information coefficient (Spearman correlation of prediction and return) with its spread,
+  t-statistic and hit rate; the long and short legs' P&L before and after costs; how often a held
+  book is all one sign and its mean net and gross exposure; how many of the trader's top names
+  clear its cost gate; the cross-sectional spread of the predictions next to the label's; and the
+  out-of-sample R² under squared error (`r2_mse`). A value that is undefined for a fold, such as
+  the IC of a constant forecast, is `null`;
+- `val/importance.parquet`, with `--importance`, for a model with an estimator: one row per
+  feature. The `nonlinear` fit adds its own account (LightGBM `gain`, `split` count and TreeSHAP
+  `shap`); every fit gets permutation importance on the validation rows (Breiman 2001):
+  `perm_mse`, the rise in squared error, and `perm_ic`, the fall in the mean per-period IC, when
+  one feature's column is shuffled. A correlated twin can make a feature look unimportant, so
+  read these as the cost of losing a column's values, not as causes.
+
+`diagnose` reads those files (no dataset needed) and writes `<run>/diagnose/`:
+
+```bash
+python -m ml4trading.train --method nonlinear --out runs/nonlinear --importance
+python -m ml4trading.diagnose --run runs/nonlinear
+```
+
+- `folds.csv`: one row per fold -- `val_net_sharpe` (the chosen candidate's score,
+  `candidate_val_net_sharpe[chosen]`) and every `val_diagnostics` key; `by_test_year.csv`: their
+  mean per test year, with the number of folds;
+- `importance.csv`: per feature and measure, the mean over folds, the mean rank (1 = largest,
+  ranked within each fold) and the share of folds in which it is in the top 20;
+  `importance_stability.csv`: per measure, the mean Spearman correlation and top-20 overlap
+  between consecutive folds' importance vectors. Folds without an importance table are left out;
+- `summary.md`: the mean and median `val_net_sharpe`, the means of the headline diagnostics (a
+  fold where one is undefined is not counted in its mean) and the 20 top-ranked features.
+
 ## Adding a model
 
 1. Subclass `ml4trading.models.Model` and implement `fit_predict_fold(frames, fit_window,
