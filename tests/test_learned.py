@@ -1,9 +1,11 @@
 import json
+import warnings
 
 import numpy as np
 import pandas as pd
 import pytest
 from conftest import write_dataset
+from sklearn.exceptions import ConvergenceWarning
 
 from ml4trading import config
 from ml4trading.backtest import backtest
@@ -232,3 +234,16 @@ def test_a_label_realized_after_the_fit_window_is_not_fitted(learned_data, metho
     got = model.fit_predict_fold(Frames(panel, frames.X), FIT, JUNE)
     pd.testing.assert_frame_equal(got.predictions, want.predictions)
     assert got.n_fit_rows == want.n_fit_rows
+
+
+def test_the_linear_fit_converges_across_the_grid(frames):
+    # more fit rows than features, as on the real data (a short window here has fewer, and an
+    # under-determined net may never converge)
+    long_fit = (pd.Timestamp("2021-03-01"), pd.Timestamp("2021-11-22"))
+    december = (pd.Timestamp("2021-12-01"), pd.Timestamp("2021-12-31"))
+    for ratio in (0.001, 0.01, 0.1):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ConvergenceWarning)
+            _model("linear", alpha_ratio=ratio).fit_predict_fold(
+                frames["linear"], long_fit, december
+            )

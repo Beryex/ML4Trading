@@ -137,7 +137,10 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             "hold_overnight": True,
             "alpha_ratio": 0.01,  # a point of grids/linear.yaml
             "l1_ratio": 0.5,  # scikit-learn ElasticNet's default
-            "max_iter": 1000,  # scikit-learn ElasticNet's default
+            # a convergence cap, not a model choice: scikit-learn's default 1000 stops short at the
+            # grid's smallest alpha_ratio, which took 59,010 iterations (0.4 s) on a full fit slice
+            # and up to 241,123 on the synthetic test data
+            "max_iter": 1_000_000,
         },
     },
     # LightGBM on the same features (ml4trading.models.learned.nonlinear): LightGBM 4's own
