@@ -7,6 +7,7 @@ from conftest import write_dataset
 
 from ml4trading import config
 from ml4trading.backtest import backtest
+from ml4trading.config import TIMEZONE
 from ml4trading.data import all_symbols, load_bars, load_dividends
 from ml4trading.models import Frames, get_model
 from ml4trading.models.base import rows_in
@@ -208,3 +209,26 @@ def test_a_bad_grid_is_refused_before_any_data_is_loaded(learned_data, tmp_path,
         train("linear", tmp_path / "run", learned_data, grid={"model.l1_ratio": [0.0]})
     with pytest.raises(ValueError, match="revers"):
         train("momentum", tmp_path / "run", learned_data, grid={"model.revers": [True]})
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_a_label_realized_after_the_fit_window_is_not_fitted(learned_data, method):
+    # BBB stops trading for 10 sessions right after the fit window: its last row inside the window
+    # is labelled by the open after the gap, inside the period the fit is scored on
+    model = _model(method)
+    pool = model.symbol_pool(all_symbols(learned_data))
+    loaded = model.loaded_symbols(pool)
+    bars, divs = load_bars(learned_data, loaded), load_dividends(learned_data, loaded)
+    sessions = bars["ts"].dt.tz_convert(TIMEZONE).dt.tz_localize(None).dt.normalize()
+    gap = sorted(sessions[sessions > FIT[1]].unique())[:10]
+    frames = model.build_frames(
+        bars[~((bars["symbol"] == "BBB") & sessions.isin(gap))], divs, 390, pool
+    )
+    want = model.fit_predict_fold(frames, FIT, JUNE)
+    panel = frames.panel.copy()
+    last = rows_in(panel[panel["symbol"] == "BBB"], FIT).index[-1]
+    assert panel.loc[last, "session"] == FIT[1]
+    panel.loc[last, "y"] += 0.5
+    got = model.fit_predict_fold(Frames(panel, frames.X), FIT, JUNE)
+    pd.testing.assert_frame_equal(got.predictions, want.predictions)
+    assert got.n_fit_rows == want.n_fit_rows

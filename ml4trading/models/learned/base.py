@@ -86,6 +86,19 @@ class LearnedModel(Model):
         X = build_features(bars, pool).reindex(keys)
         return Frames(panel, X.set_axis(panel.index))
 
+    def _realized_by(self, panel: pd.DataFrame, end: pd.Timestamp) -> np.ndarray:
+        """Rows whose label is known by the first session after ``end``. Overnight, a label exits
+        at the symbol's NEXT period's open, which a gap in its data can push past the embargo
+        into the window the fit is scored on; intraday it exits at its own close. ``panel`` is
+        in (symbol, period) order, as ``build_panel`` returns it."""
+        if not self.hold_overnight:
+            return np.ones(len(panel), dtype=bool)
+        later = panel.loc[panel["session"] > end, "session"]
+        if later.empty:
+            return np.ones(len(panel), dtype=bool)
+        exits = panel.groupby("symbol", observed=True, sort=False)["session"].shift(-1)
+        return (exits <= later.min()).to_numpy()
+
     def fit_predict_fold(self, frames: Frames, fit_window, predict_window) -> FoldResult:
         panel = frames.panel
         X = frames.X.set_axis(
@@ -97,6 +110,7 @@ class LearnedModel(Model):
         if fit_window is not None:
             fit[panel.index.get_indexer(rows_in(panel, fit_window).index)] = True
             fit &= np.isfinite(panel["y"].to_numpy(dtype=float))
+            fit &= self._realized_by(panel, pd.Timestamp(fit_window[1]))
         if not fit.any():
             return FoldResult(empty_predictions(), None, 0, self.loss, None)
         y_fit = panel["y"].to_numpy(dtype=float)[fit]
