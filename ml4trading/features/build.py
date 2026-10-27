@@ -141,12 +141,39 @@ def _embed_etf_features(daily_df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _daily_frames(groups: list[pd.DataFrame], workers: int) -> list[pd.DataFrame]:
+#: The columns ``_add_cross_stock_rank_features`` ranks: kept in float64 until it has run.
+RANKED = (
+    "Return_1d",
+    "Volatility_5d",
+    "Volume_MA_ratio",
+    "MA5_Deviation",
+    "OC_Momentum",
+    "Overnight_Gap_Daily",
+    "CMF_20d",
+)
+
+
+def _kept_daily_features(task: tuple[pd.DataFrame, bool]) -> pd.DataFrame:
+    """One symbol's daily features as the build keeps them, to hold its memory down: without
+    the ``SCALE_DEPENDENT`` columns and in float32, but for the ``RANKED`` columns, which are
+    ranked at full precision first. An ETF keeps ``MACD_hist_daily``: the ETF join reads it
+    before its embedded copy is dropped."""
+    bars, is_etf = task
+    daily_df = symbol_daily_features(bars)
+    kept = {"MACD_hist_daily"} if is_etf else set()
+    daily_df = daily_df.drop(
+        columns=[c for c in SCALE_DEPENDENT if c in daily_df and c not in kept]
+    )
+    # copy(): two consolidated blocks that no longer view (and so keep alive) the float64 frame
+    return daily_df.astype({c: np.float32 for c in daily_df.columns if c not in RANKED}).copy()
+
+
+def _daily_frames(tasks: list[tuple[pd.DataFrame, bool]], workers: int) -> list[pd.DataFrame]:
     if workers <= 1:
-        return [symbol_daily_features(g) for g in groups]
+        return [_kept_daily_features(t) for t in tasks]
     context = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
-        return list(pool.map(symbol_daily_features, groups, chunksize=4))
+        return list(pool.map(_kept_daily_features, tasks, chunksize=4))
 
 
 def build_features(bars: pd.DataFrame, pool: list[str], workers: int | None = None) -> pd.DataFrame:
@@ -162,19 +189,27 @@ def build_features(bars: pd.DataFrame, pool: list[str], workers: int | None = No
     if absent:
         raise ValueError(f"build_features: no bars for the feature ETF(s) {absent}")
     symbols = sorted(set(stocks) | set(FEATURE_ETFS))
-    by_symbol = dict(tuple(bars[bars["symbol"].isin(symbols)].groupby("symbol", sort=True)))
-    loaded = [s for s in symbols if s in by_symbol]
+    groups = bars[bars["symbol"].isin(symbols)].groupby("symbol", sort=True)
+    tasks = [(g, s in FEATURE_ETFS) for s, g in groups]
+    loaded = [s for s, _ in groups]
     if workers is None:
         workers = min(8, os.cpu_count() or 1, max(1, len(loaded) // 8))
-    frames = _daily_frames([by_symbol[s] for s in loaded], workers)
-    daily_df = pd.concat([f.assign(symbol=s) for s, f in zip(loaded, frames, strict=True)])
-    daily_df = _add_cross_stock_rank_features(daily_df).copy()  # one block again
+    frames = _daily_frames(tasks, workers)
+    del tasks, groups
+    lengths = [len(f) for f in frames]
+    daily_df = pd.concat(frames)
+    del frames
+    daily_df["symbol"] = np.repeat(loaded, lengths)
+    daily_df = _add_cross_stock_rank_features(daily_df)
+    # float32 from here on: the ranks are taken, every later step only moves values
+    daily_df = daily_df.astype({c: np.float32 for c in daily_df.columns if c != "symbol"})
     daily_df = _embed_etf_features(daily_df)
-    daily_df = daily_df.drop(columns=[c for c in SCALE_DEPENDENT if c in daily_df.columns])
+    daily_df = daily_df.drop(columns=[c for c in SCALE_DEPENDENT if c in daily_df])
 
     daily_df = daily_df.set_index("symbol", append=True).sort_index(level=["symbol", "session"])
     features = daily_df.groupby(level="symbol", sort=False).shift(1)
-    features = features.replace([np.inf, -np.inf], np.nan).astype(np.float32)
+    del daily_df
+    features = features.replace([np.inf, -np.inf], np.nan)
     codes = {s: i for i, s in enumerate(stocks)}
     stock_id = features.index.get_level_values("symbol").map(codes).astype(np.float32)
     features.insert(0, "stock_id", np.asarray(stock_id))

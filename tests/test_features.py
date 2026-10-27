@@ -1,6 +1,9 @@
+import tracemalloc
+
 import numpy as np
 import pandas as pd
 import pytest
+from conftest import make_bars
 
 from ml4trading.config import TIMEZONE
 from ml4trading.data import load_bars
@@ -138,3 +141,20 @@ def test_order_and_workers_do_not_matter(bars):
     ids = want["stock_id"].groupby(level="symbol").unique()
     assert {s: list(v) for s, v in ids.items()} == {"AAA": [0], "BBB": [1], "CCC": [2]}
     assert list(want.columns[:1]) == ["stock_id"]
+
+
+def test_the_build_holds_few_copies_of_its_result(tmp_path):
+    # the real build is ~1 GB of float32: every extra float64 copy of the daily frames is GBs
+    (tmp_path / "bars_30min").mkdir()
+    symbols = [f"S{i:02d}" for i in range(40)] + list(FEATURE_ETFS)
+    for i, s in enumerate(symbols):
+        bars = make_bars(i + 1, "2021-01-04", "2021-12-31", 50.0 + i)
+        bars.to_parquet(tmp_path / "bars_30min" / f"{s}.parquet", index=False)
+    bars = load_bars(tmp_path, symbols)
+    tracemalloc.start()
+    try:
+        feats = build_features(bars, symbols[:40], workers=1)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak <= 5 * feats.memory_usage(deep=True).sum()  # 4.0x; it was 10.3x

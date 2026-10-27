@@ -87,7 +87,8 @@ universe decides what is traded.
   stochastics, ADX, CCI, MFI, Bollinger), lags, seven cross-sectional ranks, VOO's and QQQ's
   own features, calendar features and a stock code. The row of session *d* holds what was known
   at *d*'s open: the features of the stock's previous session. The package docstring lists every
-  adaptation; the features are built once per run (about a minute on the full dataset).
+  adaptation; the features are built once per run (about a minute and 8 GB of memory on the
+  full dataset).
 - **Split-adjusted levels are left out.** Prices and volumes are split-adjusted back from the
   end of the data, so a stock's past price or volume LEVEL reveals whether it split later --
   which companies do after their shares have risen. Every feature that moves when one stock's
