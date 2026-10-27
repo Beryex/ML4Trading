@@ -61,6 +61,25 @@ class LGBMArtifact(FitArtifact):
             self.booster.predict(X[self.feature_names()], num_threads=NUM_THREADS), dtype=float
         )
 
+    def native_importance(self, X: pd.DataFrame) -> pd.DataFrame:
+        """What the booster itself says about each feature, indexed by feature name: ``gain``
+        and ``split`` (the total loss reduction and the number of splits on it, over all trees)
+        and ``shap``, the mean absolute TreeSHAP contribution to ``X``'s rows (Lundberg & Lee
+        2017). LightGBM appends the expected value as the last contribution column; it belongs
+        to no feature and is dropped."""
+        names = self.feature_names()
+        contrib = np.asarray(
+            self.booster.predict(X[names], pred_contrib=True, num_threads=NUM_THREADS), dtype=float
+        )
+        return pd.DataFrame(
+            {
+                "gain": self.booster.feature_importance("gain"),
+                "split": self.booster.feature_importance("split"),
+                "shap": np.abs(contrib[:, :-1]).mean(axis=0),
+            },
+            index=pd.Index(names, name="feature"),
+        )
+
     def save(self, directory: Path) -> None:
         Path(directory).mkdir(parents=True, exist_ok=True)
         self.booster.save_model(str(Path(directory) / self.FILENAME))

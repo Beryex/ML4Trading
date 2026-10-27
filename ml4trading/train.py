@@ -1,6 +1,7 @@
 """Walk-forward training: one model per fold boundary of the test path.
 
     python -m ml4trading.train --method investment --out runs/investment [--grid grid.yaml]
+        [--importance]
 
 The method's frames (``ml4trading.models.base``) are built once for the whole run. Per fold
 boundary B (calendar: ``ml4trading.folds``):
@@ -19,7 +20,8 @@ boundary B (calendar: ``ml4trading.folds``):
    candidate's validation book, ``ml4trading.diagnostics``), universe.json, predictions.parquet,
    val/predictions.parquet (the chosen candidate's scored validation rows, kept from the
    validation pass, never refitted) and, for a model that fits one, the fitted estimator under
-   model/.
+   model/. With ``--importance`` that same validation fit is also scored for feature importance
+   (``ml4trading.importance``) on those rows: val/importance.parquet, one row per feature.
 
 A model fits on every symbol of its pool; the universe only decides what is traded. The grid
 file maps dotted ``model.*`` keys to lists of values; only model parameters are searched per
@@ -44,6 +46,7 @@ from ml4trading.config import RunConfig
 from ml4trading.data import default_data_dir
 from ml4trading.diagnostics import validation_diagnostics
 from ml4trading.folds import embargoed_end, fold_at, fold_boundaries
+from ml4trading.importance import importance_table
 from ml4trading.models import FoldResult, Frames, get_model
 from ml4trading.models.base import empty_predictions
 from ml4trading.models.learned.losses import oos_r2
@@ -89,6 +92,15 @@ def _scored_val(
     )
     scored = scored[np.isfinite(scored["y"].to_numpy(dtype=float))]
     return scored.assign(label=scored["y"])[_SCORED_COLUMNS].reset_index(drop=True)
+
+
+def _scored_features(frames: Frames, scored: pd.DataFrame) -> pd.DataFrame:
+    """The features of the scored rows, in their order and indexed by (period, symbol) as a
+    model receives them."""
+    panel = frames.panel
+    keys = pd.MultiIndex.from_arrays([panel["period"], panel["symbol"]], names=["period", "symbol"])
+    wanted = pd.MultiIndex.from_frame(scored[["period", "symbol"]])
+    return frames.X.iloc[keys.get_indexer(wanted)].set_axis(wanted)
 
 
 def _val_r2(result: FoldResult | None, scored: pd.DataFrame) -> float | None:
@@ -137,6 +149,7 @@ def train(
     data_dir: Path,
     grid: dict | None = None,
     overrides: dict | None = None,
+    importance: bool = False,
 ) -> Path:
     base = config_mod.resolve(method, overrides)
     _check_grid(method, grid)
@@ -207,6 +220,15 @@ def train(
         kept.scored.drop(columns="open_px").to_parquet(
             fdir / "val" / "predictions.parquet", index=False
         )
+        artifact = None if kept.result is None else kept.result.artifact
+        if importance and artifact is not None and len(kept.scored):
+            table = importance_table(
+                artifact,
+                _scored_features(frames, kept.scored),
+                kept.scored["label"].to_numpy(),
+                kept.scored["y"].to_numpy(),
+            )
+            table.reset_index().to_parquet(fdir / "val" / "importance.parquet", index=False)
         (fdir / "universe.json").write_text(json.dumps(universe) + "\n")
         preds.to_parquet(fdir / "predictions.parquet", index=False)
         if result is not None and result.artifact is not None:
@@ -234,13 +256,26 @@ def main() -> None:
         metavar="KEY=VALUE",
         help="override one config value, e.g. --set capital=10000 (value parsed as YAML)",
     )
+    ap.add_argument(
+        "--importance",
+        action="store_true",
+        help="also score the chosen candidate's validation fit for feature importance "
+        "(folds/<F>/val/importance.parquet); fits with no estimator write none",
+    )
     args = ap.parse_args()
     grid = yaml.safe_load(args.grid.read_text()) if args.grid else None
     overrides = {}
     for item in args.set:
         key, _, value = item.partition("=")
         overrides[key] = yaml.safe_load(value)
-    train(args.method, args.out, args.data_dir, grid=grid, overrides=overrides)
+    train(
+        args.method,
+        args.out,
+        args.data_dir,
+        grid=grid,
+        overrides=overrides,
+        importance=args.importance,
+    )
 
 
 if __name__ == "__main__":
