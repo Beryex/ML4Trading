@@ -52,13 +52,16 @@ class FoldResult:
     """One fold's fit and predictions. ``artifact`` is the fitted estimator (a
     ``ml4trading.models.learned.base.FitArtifact``) or None; ``loss`` and
     ``baseline_prediction`` (the fit rows' mean under mse, median under l1) are set by a model
-    that fits a loss."""
+    that fits a loss; ``fit_label_mean`` (the mean label of the rows the fit trained on) is
+    set by a model that fits, whatever its loss -- the reference of the validation diagnostics'
+    squared-error R². A fit-free model leaves all three None; a fit with no rows, the last two."""
 
     predictions: pd.DataFrame
     artifact: object | None
     n_fit_rows: int
     loss: str | None = None
     baseline_prediction: float | None = None
+    fit_label_mean: float | None = None
 
 
 class Model(ABC):

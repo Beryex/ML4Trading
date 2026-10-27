@@ -90,6 +90,30 @@ def test_a_learned_model_is_searched_per_fold_and_causal(data_dir, tmp_path):
     assert_causal(model, *_inputs(data_dir), FIT_WINDOW, JUNE)
 
 
+def test_a_fit_free_model_keeps_validation_too(data_dir, tmp_path):
+    run = train("investment", tmp_path / "run", data_dir, overrides=SHORT_FOLDS)
+    fdir = run / "folds" / "F2021-07"
+    val = pd.read_parquet(fdir / "val" / "predictions.parquet")
+    assert list(val.columns) == ["period", "symbol", "prediction", "y", "label"]
+    assert len(val) > 0
+    fold = json.loads((fdir / "fold.json").read_text())
+    assert fold["val_diagnostics"]["ic_mean"] is None  # a constant forecast has no IC
+    assert fold["val_diagnostics"]["net_sharpe"] == fold["candidate_val_net_sharpe"][0]
+
+
+def test_an_empty_validation_universe_still_writes_its_outputs(data_dir, tmp_path):
+    # momentum selects nobody on this data: no fit, no prediction, a book that never holds a name
+    run = train("momentum", tmp_path / "run", data_dir, overrides=SHORT_FOLDS)
+    fdir = run / "folds" / "F2021-07"
+    assert json.loads((fdir / "universe.json").read_text()) == []
+    val = pd.read_parquet(fdir / "val" / "predictions.parquet")
+    assert list(val.columns) == ["period", "symbol", "prediction", "y", "label"]
+    assert val.empty
+    diagnostics = json.loads((fdir / "fold.json").read_text())["val_diagnostics"]
+    assert diagnostics["ic_mean"] is None and diagnostics["r2_mse"] is None
+    assert diagnostics["same_sign_share"] is None
+
+
 def test_causality_check_catches_a_peeking_model(data_dir):
     class Peeking(LastReturn):
         def fit_predict_fold(self, frames, fit_window, predict_window):

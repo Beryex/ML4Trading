@@ -17,7 +17,7 @@ from ml4trading.models.learned.linear import impute_by_period
 from ml4trading.models.learned.losses import baseline_prediction, loss_value, oos_r2
 from ml4trading.pipeline import load_frames
 from ml4trading.testing import assert_causal
-from ml4trading.train import train
+from ml4trading.train import _scored_val, train
 
 METHODS = ["linear", "nonlinear"]
 FIT = (pd.Timestamp("2021-03-01"), pd.Timestamp("2021-05-21"))
@@ -198,6 +198,58 @@ def test_a_fit_free_model_records_no_r2(learned_data, tmp_path):
     fold = json.loads((run / "folds" / "F2021-07" / "fold.json").read_text())
     assert fold["candidate_val_r2"] == [None]
     assert not (run / "folds" / "F2021-07" / "model").exists()
+
+
+def test_the_chosen_candidates_validation_is_kept(learned_data, tmp_path):
+    grid = {"model.alpha_ratio": [0.01, 0.1]}
+    run = train("linear", tmp_path / "run", learned_data, grid=grid, overrides=SHORT_FOLDS)
+    for fdir in sorted((run / "folds").iterdir()):
+        fold = json.loads((fdir / "fold.json").read_text())
+        val = pd.read_parquet(fdir / "val" / "predictions.parquet")
+        assert list(val.columns) == ["period", "symbol", "prediction", "y", "label"]
+        assert len(val) > 0
+        assert np.isfinite(val["y"]).all()
+        assert set(val["symbol"]) <= set(json.loads((fdir / "universe.json").read_text()))
+        diagnostics = fold["val_diagnostics"]
+        keys = "net_sharpe beta ic_mean long_net same_sign_share gate_pass_mean".split()
+        assert set(keys + ["pred_xs_std", "r2_mse"]) <= set(diagnostics)
+        assert diagnostics["net_sharpe"] == fold["candidate_val_net_sharpe"][fold["chosen"]]
+
+
+def test_the_kept_validation_is_the_chosen_candidates_not_the_last(learned_data, tmp_path):
+    # alpha_ratio 0.1 wins every fold; listed first or last, its validation is what is kept
+    runs = {}
+    for name, ratios in (("last", [0.01, 0.1]), ("first", [0.1, 0.01])):
+        grid = {"model.alpha_ratio": ratios}
+        out = tmp_path / name
+        runs[name] = train("linear", out, learned_data, grid=grid, overrides=SHORT_FOLDS)
+    for fdir in sorted((runs["first"] / "folds").iterdir()):
+        fold = json.loads((fdir / "fold.json").read_text())
+        assert fold["chosen"] == 0
+        assert fold["val_diagnostics"]["net_sharpe"] == max(fold["candidate_val_net_sharpe"])
+        other = runs["last"] / "folds" / fdir.name
+        kept_first = pd.read_parquet(fdir / "val" / "predictions.parquet")
+        kept_last = pd.read_parquet(other / "val" / "predictions.parquet")
+        assert kept_first.equals(kept_last)
+        other_fold = json.loads((other / "fold.json").read_text())
+        assert other_fold["val_diagnostics"] == fold["val_diagnostics"]
+
+
+def test_scored_val_drops_unlabelled_rows(frames):
+    # the data's last session has no next open, so overnight its rows have no label
+    panel = frames["linear"].panel
+    last_two = sorted(panel["session"].unique())[-2:]
+    unlabelled = panel[panel["session"] == last_two[1]]
+    assert unlabelled["y"].isna().all()
+    rows = panel[panel["session"].isin(last_two)]
+    preds = rows[["period", "symbol"]].assign(prediction=0.001)
+    result = _model("linear").fit_predict_fold(frames["linear"], FIT, (last_two[0], last_two[1]))
+    scored = _scored_val(result, preds, panel, sorted(rows["period"].unique()))
+    assert list(scored.columns) == ["period", "symbol", "prediction", "y", "label", "open_px"]
+    assert len(scored) > 0
+    assert np.isfinite(scored["y"]).all() and np.isfinite(scored["open_px"]).all()
+    assert set(scored["period"]) == set(panel.loc[panel["session"] == last_two[0], "period"])
+    pd.testing.assert_series_equal(scored["label"], scored["y"], check_names=False)
 
 
 def test_a_bad_grid_is_refused_before_any_data_is_loaded(learned_data, tmp_path, monkeypatch):

@@ -131,4 +131,5 @@ class LearnedModel(Model):
             int(fit.sum()),
             self.loss,
             baseline_prediction(y_fit, self.loss),
+            float(np.mean(y_fit)),
         )
