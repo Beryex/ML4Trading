@@ -86,6 +86,16 @@ def _check_grid(method: str, grid: dict | None) -> None:
             )
 
 
+def _check_candidates(candidates: list[RunConfig]) -> None:
+    """Build every candidate's model once, so a misspelt or invalid ``model.*`` value is refused
+    before any data is loaded."""
+    for cand in candidates:
+        try:
+            get_model(cand.method)(**cand.model)
+        except TypeError as err:  # a fixed-signature model given an unknown keyword
+            raise ValueError(f"{cand.method}: {err}") from err
+
+
 def train(
     method: str,
     out: Path,
@@ -96,6 +106,7 @@ def train(
     base = config_mod.resolve(method, overrides)
     _check_grid(method, grid)
     candidates = config_mod.expand_grid(base, grid)
+    _check_candidates(candidates)
     pool, frames = load_frames(base, data_dir)
     panel = frames.panel
     daily_inputs = load_daily_inputs(base, data_dir, pool)

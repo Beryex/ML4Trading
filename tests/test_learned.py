@@ -195,3 +195,16 @@ def test_a_fit_free_model_records_no_r2(learned_data, tmp_path):
     fold = json.loads((run / "folds" / "F2021-07" / "fold.json").read_text())
     assert fold["candidate_val_r2"] == [None]
     assert not (run / "folds" / "F2021-07" / "model").exists()
+
+
+def test_a_bad_grid_is_refused_before_any_data_is_loaded(learned_data, tmp_path, monkeypatch):
+    def no_loading(*args, **kwargs):
+        raise AssertionError("the data was loaded before the grid was checked")
+
+    monkeypatch.setattr("ml4trading.train.load_frames", no_loading)
+    with pytest.raises(ValueError, match="alpha"):
+        train("linear", tmp_path / "run", learned_data, grid={"model.alpha": [0.1]})
+    with pytest.raises(ValueError, match="l1_ratio"):
+        train("linear", tmp_path / "run", learned_data, grid={"model.l1_ratio": [0.0]})
+    with pytest.raises(ValueError, match="revers"):
+        train("momentum", tmp_path / "run", learned_data, grid={"model.revers": [True]})
