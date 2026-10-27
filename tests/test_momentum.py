@@ -2,8 +2,8 @@ import pandas as pd
 import pytest
 
 from ml4trading import config
-from ml4trading.models import get_model
-from ml4trading.pipeline import load_panel
+from ml4trading.data import all_symbols, load_bars, load_dividends
+from ml4trading.models import Frames, get_model
 from ml4trading.testing import assert_causal
 
 
@@ -20,7 +20,8 @@ def _panel():
 def test_prediction_is_the_previous_periods_change(reverse, sign):
     panel = _panel()
     model = get_model("momentum")(hold_overnight=True, reverse=reverse)
-    out = model.predict(panel, (panel["period"].min(), panel["period"].max()))
+    window = (panel["period"].min(), panel["period"].max())
+    out = model.fit_predict_fold(Frames(panel, None), None, window).predictions
     got = {(r.symbol, r.period.day): r.prediction for r in out.itertuples()}
     # day 6 is predicted from day 5's change over day 4, day 7 from day 6's over day 5
     assert got == pytest.approx(
@@ -39,12 +40,14 @@ def test_defaults():
     assert cfg.trader.symbol_selection_strategy == "BOTH"
 
 
-def test_momentum_is_causal(data_dir):
-    cfg = config.resolve("momentum")
-    _, panel = load_panel(cfg, data_dir)
-    for reverse in (False, True):
-        model = get_model("momentum")(hold_overnight=True, reverse=reverse)
-        assert_causal(model, panel, (pd.Timestamp("2021-06-01"), pd.Timestamp("2021-06-30")))
+@pytest.mark.parametrize("k", [390, 1950])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_momentum_is_causal(data_dir, k, reverse):
+    pool = all_symbols(data_dir)
+    bars, divs = load_bars(data_dir, pool), load_dividends(data_dir, pool)
+    model = get_model("momentum")(hold_overnight=True, reverse=reverse)
+    window = (pd.Timestamp("2021-06-01"), pd.Timestamp("2021-06-30"))
+    assert_causal(model, bars, divs, k, pool, None, window)
 
 
 def test_weekly_momentum_trains_and_replays(data_dir, tmp_path):

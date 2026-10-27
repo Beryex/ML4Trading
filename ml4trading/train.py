@@ -2,21 +2,25 @@
 
     python -m ml4trading.train --method investment --out runs/investment [--grid grid.yaml]
 
-Per fold boundary B (calendar: ``ml4trading.folds``):
+The method's frames (``ml4trading.models.base``) are built once for the whole run. Per fold
+boundary B (calendar: ``ml4trading.folds``):
 
 1. VALIDATION -- for every candidate configuration of the grid: select the universe on the
    train window, fit on the train window (its last ``embargo_days`` sessions dropped), predict
-   the validation window, and trade it (validation window minus its first ``embargo_days``
-   sessions) from flat; the candidate's score is that book's net Sharpe. The first best wins.
-   With no grid there is one candidate, scored all the same.
+   the validation window, keep the universe's predictions and trade them (validation window
+   minus its first ``embargo_days`` sessions) from flat; the candidate's score is that book's
+   net Sharpe. The first best wins. With no grid there is one candidate, scored all the same.
 2. DEPLOYMENT -- with the chosen configuration: select the universe on the deploy window (the
    trailing ``train_months`` before B), fit on it (embargoed the same way), and predict the
-   test month.
+   test month, again keeping the universe's predictions.
 3. The fold is written to ``<out>/folds/<FYYYY-MM>/``: fold.json (windows, candidate scores,
-   the choice), universe.json, predictions.parquet and the fitted model.
+   the choice), universe.json, predictions.parquet and, for a model that fits one, the fitted
+   estimator under model/.
 
-The grid file maps dotted ``model.*`` keys to lists of values; only model parameters are
-searched per fold -- the selector, the trader, the costs and K are fixed for the whole run.
+A model fits on every symbol of its pool; the universe only decides what is traded. The grid
+file maps dotted ``model.*`` keys to lists of values; only model parameters are searched per
+fold, and never one the frames are built from (``Model.FRAME_PARAMS``) -- the selector, the
+trader, the costs and K are fixed for the whole run.
 """
 
 from __future__ import annotations
@@ -34,26 +38,38 @@ from ml4trading import config as config_mod
 from ml4trading.config import RunConfig
 from ml4trading.data import default_data_dir
 from ml4trading.folds import embargoed_end, fold_at, fold_boundaries
-from ml4trading.models import get_model
-from ml4trading.pipeline import load_daily_inputs, load_panel, score_book, window_periods
+from ml4trading.models import FoldResult, Frames, get_model
+from ml4trading.models.base import empty_predictions
+from ml4trading.pipeline import load_daily_inputs, load_frames, score_book, window_periods
 from ml4trading.selector import select_universe
 
 
-def _fit_predict(cfg: RunConfig, panel, pool, select_window, fit_window_end, predict_window):
-    """(universe, fitted model, predictions) for one configuration."""
-    universe = select_universe(panel, select_window, cfg.selector, pool)
-    sub = panel[panel["symbol"].isin(set(universe))]
-    model = get_model(cfg.method)(**cfg.model)
-    if universe and fit_window_end is not None:
-        model.fit(sub, (pd.Timestamp(select_window[0]), fit_window_end))
-    preds = model.predict(sub, predict_window) if universe else _no_predictions()
-    return universe, model, preds
-
-
-def _no_predictions() -> pd.DataFrame:
-    return pd.DataFrame(
-        {"period": pd.Series(dtype="datetime64[ns]"), "symbol": [], "prediction": []}
+def _fit_predict(
+    cfg: RunConfig, frames: Frames, pool, select_window, fit_window_end, predict_window
+) -> tuple[list[str], FoldResult | None, pd.DataFrame]:
+    """(universe, fold result, the universe's predictions) for one configuration; an empty
+    universe fits nothing."""
+    universe = select_universe(frames.panel, select_window, cfg.selector, pool)
+    if not universe:
+        return universe, None, empty_predictions()
+    fit_window = (
+        None if fit_window_end is None else (pd.Timestamp(select_window[0]), fit_window_end)
     )
+    result = get_model(cfg.method)(**cfg.model).fit_predict_fold(frames, fit_window, predict_window)
+    preds = result.predictions
+    return universe, result, preds[preds["symbol"].isin(set(universe))].reset_index(drop=True)
+
+
+def _check_grid(method: str, grid: dict | None) -> None:
+    frame_params = get_model(method).FRAME_PARAMS
+    for key in grid or {}:
+        if not key.startswith("model."):
+            raise ValueError(f"grid key {key!r}: only model.* parameters are searched per fold")
+        if key.removeprefix("model.") in frame_params:
+            raise ValueError(
+                f"grid key {key!r}: the run's frames are built from it once, so it cannot be "
+                f"searched per fold"
+            )
 
 
 def train(
@@ -64,11 +80,10 @@ def train(
     overrides: dict | None = None,
 ) -> Path:
     base = config_mod.resolve(method, overrides)
-    for key in grid or {}:
-        if not key.startswith("model."):
-            raise ValueError(f"grid key {key!r}: only model.* parameters are searched per fold")
+    _check_grid(method, grid)
     candidates = config_mod.expand_grid(base, grid)
-    pool, panel = load_panel(base, data_dir)
+    pool, frames = load_frames(base, data_dir)
+    panel = frames.panel
     daily_inputs = load_daily_inputs(base, data_dir, pool)
     sessions = sorted(panel["session"].unique())
     embargo = base.folds.embargo_days
@@ -89,14 +104,16 @@ def train(
         scores = []
         for cand in candidates:
             fit_end = embargoed_end(fold.train[1], sessions, embargo)
-            _, _, preds = _fit_predict(cand, panel, pool, fold.train, fit_end, fold.val)
+            _, _, preds = _fit_predict(cand, frames, pool, fold.train, fit_end, fold.val)
             periods = window_periods(panel, fold.val, skip_sessions=embargo)
             *_, metrics = score_book(preds, panel, periods, cand, daily_inputs=daily_inputs)
             scores.append(float(metrics.get("net_sharpe", 0.0)))
         best = int(np.argmax(scores))
         chosen = candidates[best]
         fit_end = embargoed_end(fold.deploy[1], sessions, embargo)
-        universe, model, preds = _fit_predict(chosen, panel, pool, fold.deploy, fit_end, fold.test)
+        universe, result, preds = _fit_predict(
+            chosen, frames, pool, fold.deploy, fit_end, fold.test
+        )
 
         fdir = out / "folds" / fold.name
         fdir.mkdir(parents=True, exist_ok=True)
@@ -111,7 +128,8 @@ def train(
         (fdir / "fold.json").write_text(json.dumps(meta, indent=2) + "\n")
         (fdir / "universe.json").write_text(json.dumps(universe) + "\n")
         preds.to_parquet(fdir / "predictions.parquet", index=False)
-        model.save(fdir / "model")
+        if result is not None and result.artifact is not None:
+            result.artifact.save(fdir / "model")
         run["folds"].append(fold.name)
         print(
             f"{fold.name}: universe {len(universe)}, val net Sharpe {scores[best]:+.3f} "

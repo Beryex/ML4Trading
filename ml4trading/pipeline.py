@@ -1,4 +1,5 @@
-"""What training and backtesting share: loading a method's panel, scoring a window's book."""
+"""What training and backtesting share: loading a method's frames or panel, scoring a window's
+book."""
 
 from __future__ import annotations
 
@@ -11,12 +12,23 @@ from ml4trading.book import daily_values, run_book
 from ml4trading.config import BENCHMARK, SESSION_MINUTES, RunConfig
 from ml4trading.data import all_symbols, load_bars, load_dividends
 from ml4trading.metrics import summarize
-from ml4trading.models import get_model
+from ml4trading.models import Frames, get_model
 from ml4trading.periods import build_panel
 
 
+def load_frames(cfg: RunConfig, data_dir: Path) -> tuple[list[str], Frames]:
+    """(the method's symbol pool, its frames over the whole dataset): the bars and dividends
+    of ``loaded_symbols(pool)`` through ``build_frames``, once."""
+    model = get_model(cfg.method)(**cfg.model)
+    pool = model.symbol_pool(all_symbols(data_dir))
+    loaded = model.loaded_symbols(pool)
+    bars, divs = load_bars(data_dir, loaded), load_dividends(data_dir, loaded)
+    return pool, model.build_frames(bars, divs, cfg.K, pool)
+
+
 def load_panel(cfg: RunConfig, data_dir: Path) -> tuple[list[str], pd.DataFrame]:
-    """(the method's symbol pool, its labelled panel over the whole dataset)."""
+    """(the method's symbol pool, its labelled panel over the whole dataset): what a backtest
+    prices predictions with -- ``load_frames``' panel, without building features."""
     model = get_model(cfg.method)(**cfg.model)
     pool = model.symbol_pool(all_symbols(data_dir))
     bars = load_bars(data_dir, pool)
