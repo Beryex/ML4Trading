@@ -2,6 +2,7 @@
 
     python -m ml4trading.train --method investment --out runs/investment [--grid grid.yaml]
         [--importance]
+    python -m ml4trading.train --method nonlinear --out runs/nonlinear --hpo-hours 12
 
 The method's frames (``ml4trading.models.base``) are built once for the whole run. Per fold
 boundary B (calendar: ``ml4trading.folds``):
@@ -21,7 +22,15 @@ boundary B (calendar: ``ml4trading.folds``):
    val/predictions.parquet (the chosen candidate's scored validation rows, kept from the
    validation pass, never refitted) and, for a model that fits one, the fitted estimator under
    model/. With ``--importance`` that same validation fit is also scored for feature importance
-   (``ml4trading.importance``) on those rows: val/importance.parquet, one row per feature.
+   (``ml4trading.importance``) on those rows: val/importance.parquet, one row per feature. A
+   fold's val/ directory is emptied before it is written, so a re-run into the same ``--out``
+   leaves no file of an earlier run.
+
+With ``--hpo-hours H`` (``nonlinear`` only, in place of a grid) step 1 is a search instead
+(``ml4trading.hpo``): the run's budget of H hours is split evenly across the folds, and each fold
+searches its parameters for that long on the validation window. The winner is the single
+candidate -- scored, kept and deployed like a grid's winner -- and fold.json gains an ``hpo``
+block with every trial.
 
 A model fits on every symbol of its pool; the universe only decides what is traded. The grid
 file maps dotted ``model.*`` keys to lists of values; only model parameters are searched per
@@ -33,7 +42,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import time
+from collections.abc import Iterator
+from dataclasses import asdict
 from pathlib import Path
 from typing import NamedTuple
 
@@ -42,6 +54,7 @@ import pandas as pd
 import yaml
 
 from ml4trading import config as config_mod
+from ml4trading import hpo as hpo_mod
 from ml4trading.config import RunConfig
 from ml4trading.data import default_data_dir
 from ml4trading.diagnostics import validation_diagnostics
@@ -60,6 +73,17 @@ from ml4trading.pipeline import (
 from ml4trading.selector import select_universe
 
 
+def _fit_window(select_window, fit_window_end):
+    """The window a fit may use: from the selection window's start to the embargoed end; None
+    when nothing is left."""
+    return None if fit_window_end is None else (pd.Timestamp(select_window[0]), fit_window_end)
+
+
+def _gated(preds: pd.DataFrame, universe: list[str]) -> pd.DataFrame:
+    """Only the universe's predictions: a model fits on its whole pool, the universe is traded."""
+    return preds[preds["symbol"].isin(set(universe))].reset_index(drop=True)
+
+
 def _fit_predict(
     cfg: RunConfig, frames: Frames, pool, select_window, fit_window_end, predict_window
 ) -> tuple[list[str], FoldResult | None, pd.DataFrame]:
@@ -68,12 +92,9 @@ def _fit_predict(
     universe = select_universe(frames.panel, select_window, cfg.selector, pool)
     if not universe:
         return universe, None, empty_predictions()
-    fit_window = (
-        None if fit_window_end is None else (pd.Timestamp(select_window[0]), fit_window_end)
-    )
+    fit_window = _fit_window(select_window, fit_window_end)
     result = get_model(cfg.method)(**cfg.model).fit_predict_fold(frames, fit_window, predict_window)
-    preds = result.predictions
-    return universe, result, preds[preds["symbol"].isin(set(universe))].reset_index(drop=True)
+    return universe, result, _gated(result.predictions, universe)
 
 
 _SCORED_COLUMNS = ["period", "symbol", "prediction", "y", "label", "open_px"]
@@ -121,9 +142,22 @@ def _val_r2(result: FoldResult | None, scored: pd.DataFrame) -> float | None:
     return oos_r2(scored["label"], scored["prediction"], result.baseline_prediction, result.loss)
 
 
-class _Kept(NamedTuple):
-    """What the best candidate's validation pass produced, kept so nothing is refitted."""
+class _Fit(NamedTuple):
+    """One validation fit: the configuration it was made with, its result (None when nothing was
+    fitted) and the universe's predictions over the validation window."""
 
+    cfg: RunConfig
+    result: FoldResult | None
+    preds: pd.DataFrame
+
+
+class _Kept(NamedTuple):
+    """The best candidate so far: its index among the fold's candidates and its configuration
+    (what the fold deploys), and what its validation pass produced, kept so nothing is
+    refitted."""
+
+    index: int
+    cfg: RunConfig
     result: FoldResult | None
     scored: pd.DataFrame
     book: pd.DataFrame
@@ -153,6 +187,72 @@ def _check_candidates(candidates: list[RunConfig]) -> None:
             raise ValueError(f"{cand.method}: {err}") from err
 
 
+def _check_hpo(method: str, grid: dict | None, hpo_hours: float | None, hpo_trials: int | None):
+    """Refuse an HPO request that cannot run, before any data is loaded."""
+    if hpo_hours is None and hpo_trials is None:
+        return
+    if method != "nonlinear":
+        raise ValueError(f"HPO searches nonlinear's parameters; {method!r} has none to search")
+    if grid:
+        raise ValueError("HPO takes the place of a grid: give one or the other")
+    if hpo_hours is not None and not hpo_hours > 0:
+        raise ValueError(f"hpo_hours={hpo_hours}: the time budget must be positive")
+    if hpo_trials is not None and hpo_trials < 1:
+        raise ValueError(f"hpo_trials={hpo_trials}: a fold's baseline trial always runs")
+
+
+def _grid_fits(candidates: list[RunConfig], frames: Frames, pool, fold, fit_end) -> Iterator[_Fit]:
+    """The fold's candidates fitted on its train window and predicting its validation window,
+    one at a time."""
+    for cand in candidates:
+        _, result, preds = _fit_predict(cand, frames, pool, fold.train, fit_end, fold.val)
+        yield _Fit(cand, result, preds)
+
+
+def _hpo_fit(
+    base: RunConfig,
+    frames: Frames,
+    pool,
+    fold,
+    fit_end,
+    periods: list,
+    *,
+    timeout: float | None,
+    n_trials: int | None,
+) -> tuple[_Fit, dict]:
+    """The fold's search (``ml4trading.hpo``) as the one validation fit it stands for, and the
+    ``hpo`` block of fold.json. The search fits on the train window and early-stops on the
+    universe's rows of the scored validation periods. The winner's configuration is the run's
+    with the winner's five parameters and the round it kept as ``n_estimators``: the deploy fit
+    stops there on its own window. A fold with nothing to fit -- no universe, or no fit window --
+    is not searched and stands for the run's own configuration, as a grid's empty fold does."""
+    record = {"timeout_s": timeout, "n_trials": 0, "best_number": None, "trials": []}
+    universe = select_universe(frames.panel, fold.train, base.selector, pool)
+    if not universe or fit_end is None:
+        return _Fit(base, None, empty_predictions()), record
+    found = hpo_mod.search_fold(
+        base,
+        frames,
+        _fit_window(fold.train, fit_end),
+        periods,
+        universe,
+        timeout=timeout,
+        n_trials=n_trials,
+    )
+    best = found.best
+    chosen = config_mod.apply_overrides(
+        base,
+        {f"model.{name}": value for name, value in best.params.items()}
+        | {"model.n_estimators": best.best_iteration},
+    )
+    record.update(
+        n_trials=len(found.trials),
+        best_number=best.number,
+        trials=[asdict(trial) for trial in found.trials],
+    )
+    return _Fit(chosen, found.result, _gated(found.result.predictions, universe)), record
+
+
 def train(
     method: str,
     out: Path,
@@ -160,8 +260,14 @@ def train(
     grid: dict | None = None,
     overrides: dict | None = None,
     importance: bool = False,
+    hpo_hours: float | None = None,
+    hpo_trials: int | None = None,
 ) -> Path:
+    """Train ``method`` over every fold of the test path into ``out``. ``hpo_hours`` (the CLI's
+    ``--hpo-hours``) searches ``nonlinear``'s parameters per fold within that many hours in all;
+    ``hpo_trials`` limits a fold's search to that many trials (the Python API, for tests)."""
     base = config_mod.resolve(method, overrides)
+    _check_hpo(method, grid, hpo_hours, hpo_trials)
     _check_grid(method, grid)
     candidates = config_mod.expand_grid(base, grid)
     _check_candidates(candidates)
@@ -182,25 +288,34 @@ def train(
         "data_manifest": json.loads(manifest.read_text()) if manifest.exists() else None,
         "folds": [],
     }
+    boundaries = fold_boundaries(base.folds)
+    searching = hpo_hours is not None or hpo_trials is not None
+    timeout = hpo_hours * 3600 / len(boundaries) if hpo_hours and boundaries else None
     t0 = time.time()
-    for b in fold_boundaries(base.folds):
+    for b in boundaries:
         fold = fold_at(b, base.folds)
+        val_fit_end = embargoed_end(fold.train[1], sessions, embargo)
+        periods = window_periods(panel, fold.val, skip_sessions=embargo)
+        hpo_record = None
+        if searching:
+            winner, hpo_record = _hpo_fit(
+                base, frames, pool, fold, val_fit_end, periods, timeout=timeout, n_trials=hpo_trials
+            )
+            fits = [winner]
+        else:
+            fits = _grid_fits(candidates, frames, pool, fold, val_fit_end)
         scores, r2s = [], []
-        kept, kept_score = None, -np.inf
-        for cand in candidates:
-            fit_end = embargoed_end(fold.train[1], sessions, embargo)
-            _, result, preds = _fit_predict(cand, frames, pool, fold.train, fit_end, fold.val)
-            periods = window_periods(panel, fold.val, skip_sessions=embargo)
+        kept = None
+        for index, (cand, result, preds) in enumerate(fits):
             book, positions, _, metrics = score_book(
                 preds, panel, periods, cand, benchmark=benchmark, daily_inputs=daily_inputs
             )
             scored = _scored_val(result, preds, panel, periods)
             scores.append(float(metrics.get("net_sharpe", 0.0)))
             r2s.append(_val_r2(result, scored))
-            if kept is None or scores[-1] > kept_score:  # the first best wins, as argmax does
-                kept, kept_score = _Kept(result, scored, book, positions, metrics), scores[-1]
-        best = int(np.argmax(scores))
-        chosen = candidates[best]
+            if kept is None or scores[-1] > scores[kept.index]:  # the first best wins
+                kept = _Kept(index, cand, result, scored, book, positions, metrics)
+        best, chosen = kept.index, kept.cfg
         fit_end = embargoed_end(fold.deploy[1], sessions, embargo)
         universe, result, preds = _fit_predict(
             chosen, frames, pool, fold.deploy, fit_end, fold.test
@@ -225,8 +340,12 @@ def train(
                 None if kept.result is None else kept.result.fit_label_mean,
             ),
         }
+        if hpo_record is not None:
+            meta["hpo"] = hpo_record
         (fdir / "fold.json").write_text(json.dumps(meta, indent=2) + "\n")
-        (fdir / "val").mkdir(exist_ok=True)
+        if (fdir / "val").exists():  # nothing of an earlier run into the same --out survives
+            shutil.rmtree(fdir / "val")
+        (fdir / "val").mkdir()
         kept.scored.drop(columns="open_px").to_parquet(
             fdir / "val" / "predictions.parquet", index=False
         )
@@ -244,9 +363,14 @@ def train(
         if result is not None and result.artifact is not None:
             result.artifact.save(fdir / "model")
         run["folds"].append(fold.name)
+        picked = (
+            f"candidate {best + 1}/{len(candidates)}"
+            if hpo_record is None
+            else f"best of {hpo_record['n_trials']} HPO trials"
+        )
         print(
             f"{fold.name}: universe {len(universe)}, val net Sharpe {scores[best]:+.3f} "
-            f"(candidate {best + 1}/{len(candidates)}), {time.time() - t0:.0f}s",
+            f"({picked}), {time.time() - t0:.0f}s",
             flush=True,
         )
     (out / "run.json").write_text(json.dumps(run, indent=2, default=str) + "\n")
@@ -272,6 +396,13 @@ def main() -> None:
         help="also score the chosen candidate's validation fit for feature importance "
         "(folds/<F>/val/importance.parquet); fits with no estimator write none",
     )
+    ap.add_argument(
+        "--hpo-hours",
+        type=float,
+        metavar="H",
+        help="nonlinear only, instead of a grid: search its parameters per fold, H hours in all "
+        "split evenly across the folds (the fold's fold.json records every trial)",
+    )
     args = ap.parse_args()
     grid = yaml.safe_load(args.grid.read_text()) if args.grid else None
     overrides = {}
@@ -285,6 +416,7 @@ def main() -> None:
         grid=grid,
         overrides=overrides,
         importance=args.importance,
+        hpo_hours=args.hpo_hours,
     )
 
 

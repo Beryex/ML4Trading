@@ -131,12 +131,60 @@ universe decides what is traded.
 - **Grids** (`grids/linear.yaml`, `grids/nonlinear.yaml`) are searched per fold on validation net
   Sharpe like any method's. Each fold also records every candidate's out-of-sample R², against
   the constant fitted on its training rows (`candidate_val_r2` in `fold.json`); it is never
-  ranked on.
+  ranked on. For `nonlinear`, a per-fold search can take a grid's place (see below).
 
 ```bash
 python -m ml4trading.train --method linear --grid grids/linear.yaml --out runs/linear
 python -m ml4trading.backtest --run runs/linear
 ```
+
+### Hyperparameter search
+
+`--hpo-hours H` searches `nonlinear`'s parameters per fold in place of a grid. Each fold runs an
+[Optuna](https://optuna.org) study (the TPE sampler, seeded with 0) over its share of the budget:
+
+```bash
+python -m ml4trading.train --method nonlinear --out runs/nonlinear --hpo-hours 12
+```
+
+- **What is searched**, all on a log scale: `num_leaves` 15-255, `learning_rate` 0.005-0.5,
+  `min_data_in_leaf` 20-5000, `lambda_l1` and `lambda_l2` 1e-8-1. These are ML4Investment's
+  ranges (`model_training.py`), except `min_data_in_leaf`: it searches 20-100 on a linear scale,
+  and the range is widened to suit a fold's fit window (LightGBM's "Parameters Tuning" guide:
+  "hundreds or thousands is enough for a large dataset").
+- **A trial** fits the model on the fold's training window and stops it early on the validation
+  window: at most 1,000 rounds (ML4Investment's `NUM_ROUNDS`), stopping once the squared error on
+  the universe's labelled validation rows has not improved for 100 rounds. The number of rounds
+  is found by the fit, not searched. The trial's value is that squared error at the round the
+  fit kept, so values compare across learning rates, and the winner is the fold's lowest-value
+  trial (ranked on squared error, not on net Sharpe). The first trial is the run's own
+  configuration (`--set model.*`, or the defaults), with a zero `lambda_l1` / `lambda_l2` raised
+  to the lower bound 1e-8: every fold has a winner, and the search can only improve on it.
+- **The winner is one candidate.** Its validation predictions are scored, kept and diagnosed
+  like a grid winner's, so `candidate_val_net_sharpe` and `candidate_val_r2` have one entry and
+  `chosen` is 0. The deploy fit trains on the deploy window with the winner's five parameters and
+  `n_estimators` set to the round the winner kept.
+- **The budget** is H hours for the whole run, split evenly across the folds: `--hpo-hours 12`
+  over the default 80 folds gives each 9 minutes. A fold starts no trial once its share is
+  spent, but the trial in progress finishes and the first trial always runs, so a fold takes at
+  least one fit and may overrun its share by up to one.
+- **Validation metrics are optimistic.** As for any grid winner, a fold's `val_net_sharpe`,
+  `val_diagnostics` and R² for the HPO winner are measured on the window the winner was chosen
+  on (and whose squared error stopped its rounds). They say how well the search fitted that
+  window, not how the winner will do; the test months are the only out-of-sample result.
+- **A time budget makes a run machine-dependent.** The study is seeded, so its sequence of
+  points is fixed, but how many trials fit in a fold's share depends on the machine and its
+  load. A fold that gets further can find a better point, and so a different winner, deploy fit
+  and predictions. A re-run, or the same run on another machine, can therefore differ; read
+  `n_trials` in each fold's record. `train(..., hpo_trials=N)` (Python only) runs N trials per
+  fold instead, and that reproduces.
+- **Record.** `fold.json["hpo"]` holds `timeout_s` (the fold's share, null when only
+  `hpo_trials` was given), `n_trials`, `best_number` and `trials`: for each, its `number`,
+  `params`, `value` (validation squared error), `best_iteration` and `seconds`. A fold with
+  nothing to fit (an empty universe, or no fit window) is not searched: `n_trials` is 0 and it
+  deploys the run's own configuration.
+- HPO needs `--method nonlinear`, no `--grid` and a positive H; any other request is refused
+  before the data is loaded.
 
 ### Validation diagnostics
 

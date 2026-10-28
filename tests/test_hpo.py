@@ -1,23 +1,37 @@
+import json
+
 import pandas as pd
 import pytest
 from conftest import write_dataset
 
-from ml4trading import config
+from ml4trading import config, hpo
+from ml4trading.backtest import backtest
 from ml4trading.hpo import MAX_ROUNDS, PATIENCE, SPACE, baseline_point, search_fold
 from ml4trading.models import get_model
 from ml4trading.models.base import rows_in
 from ml4trading.models.learned.base import EarlyStop
 from ml4trading.pipeline import load_frames
+from ml4trading.train import train
 
 FIT = (pd.Timestamp("2021-03-01"), pd.Timestamp("2021-05-21"))
 JUNE = (pd.Timestamp("2021-06-01"), pd.Timestamp("2021-06-30"))
 POOL = ["AAA", "BBB", "CCC"]
+SHORT_FOLDS = {
+    "folds.train_months": 3,
+    "folds.val_months": 1,
+    "folds.path_start": "2021-06-01",
+    "folds.path_end": "2021-08-31",
+}
 
 
 @pytest.fixture(scope="module")
-def frames(tmp_path_factory):
-    data = write_dataset(tmp_path_factory.mktemp("hpo") / "data")
-    return load_frames(config.resolve("nonlinear"), data)[1]
+def learned_data(tmp_path_factory):
+    return write_dataset(tmp_path_factory.mktemp("hpo") / "data")
+
+
+@pytest.fixture(scope="module")
+def frames(learned_data):
+    return load_frames(config.resolve("nonlinear"), learned_data)[1]
 
 
 @pytest.fixture(scope="module")
@@ -153,3 +167,147 @@ def test_an_empty_fit_window_is_refused(frames, eval_periods):
     cfg = config.resolve("nonlinear")
     with pytest.raises(ValueError, match="no fit rows"):
         search_fold(cfg, frames, None, eval_periods, POOL, timeout=None, n_trials=1)
+
+
+def _folds(run):
+    """(fold.json, fold directory) of every fold of a run, in order."""
+    return [
+        (json.loads((fdir / "fold.json").read_text()), fdir)
+        for fdir in sorted((run / "folds").iterdir())
+    ]
+
+
+def test_train_with_hpo(learned_data, tmp_path, monkeypatch):
+    found = []
+    real = hpo.search_fold
+
+    def spy(*args, **kwargs):
+        found.append(real(*args, **kwargs))
+        return found[-1]
+
+    monkeypatch.setattr("ml4trading.hpo.search_fold", spy)
+    run = train(
+        "nonlinear",
+        tmp_path / "run",
+        learned_data,
+        overrides=SHORT_FOLDS,
+        hpo_trials=3,
+        importance=True,
+    )
+
+    folds = _folds(run)
+    assert len(folds) == len(found) == 3
+    for (fold, fdir), search in zip(folds, found, strict=True):
+        block = fold["hpo"]
+        assert list(block) == ["timeout_s", "n_trials", "best_number", "trials"]
+        assert block["timeout_s"] is None and block["n_trials"] == 3
+        assert [t["number"] for t in block["trials"]] == [0, 1, 2]
+        winner = block["trials"][block["best_number"]]
+        assert block["best_number"] == search.best.number
+        assert list(winner) == ["number", "params", "value", "best_iteration", "seconds"]
+        # the deploy fit takes the winner's five parameters and the round it kept
+        assert list(winner["params"]) == list(SPACE)
+        for name, value in winner["params"].items():
+            assert fold["model_params"][name] == value
+        assert fold["model_params"]["n_estimators"] == winner["best_iteration"]
+        # one candidate, the winner, whose validation is what the fold keeps
+        assert len(fold["candidate_val_net_sharpe"]) == len(fold["candidate_val_r2"]) == 1
+        assert fold["chosen"] == 0
+        assert fold["val_diagnostics"]["net_sharpe"] == fold["candidate_val_net_sharpe"][0]
+        val = pd.read_parquet(fdir / "val" / "predictions.parquet")
+        assert len(val) > 0
+        assert set(val["symbol"]) <= set(POOL)
+        # ... namely the winner's own predictions on the rows it was searched on
+        won = search.result.predictions.merge(
+            val, on=["period", "symbol"], suffixes=("_search", "")
+        )
+        assert len(won) == len(val)
+        assert won["prediction"].equals(won["prediction_search"])
+        # ... which is also the fit the importance is scored on
+        assert len(pd.read_parquet(fdir / "val" / "importance.parquet")) > 0
+    assert backtest(run, learned_data)["n_periods"] > 0
+
+
+def test_the_budget_is_split_evenly(learned_data, tmp_path, monkeypatch):
+    seen = []
+    real = hpo.search_fold
+
+    def spy(*args, timeout, n_trials):
+        seen.append((timeout, n_trials))
+        return real(*args, timeout=0.0, n_trials=1)  # the baseline alone, to keep the test short
+
+    monkeypatch.setattr("ml4trading.hpo.search_fold", spy)
+    run = train("nonlinear", tmp_path / "run", learned_data, overrides=SHORT_FOLDS, hpo_hours=0.003)
+    assert [n for _, n in seen] == [None, None, None]  # three folds, no trial limit
+    assert [t for t, _ in seen] == [pytest.approx(3.6)] * 3  # 0.003 h = 10.8 s, a third each
+    for fold, _ in _folds(run):
+        assert fold["hpo"]["timeout_s"] == pytest.approx(3.6)
+        assert fold["hpo"]["n_trials"] == 1
+
+
+def test_hpo_refusals(learned_data, tmp_path, monkeypatch):
+    def no_loading(*args, **kwargs):
+        raise AssertionError("the data was loaded before the HPO request was checked")
+
+    monkeypatch.setattr("ml4trading.train.load_frames", no_loading)
+    out = tmp_path / "run"
+    with pytest.raises(ValueError, match="grid"):
+        train("nonlinear", out, learned_data, grid={"model.num_leaves": [7]}, hpo_trials=2)
+    with pytest.raises(ValueError, match="nonlinear"):
+        train("linear", out, learned_data, hpo_trials=2)
+    with pytest.raises(ValueError, match="hpo_hours"):
+        train("nonlinear", out, learned_data, hpo_hours=0)
+    with pytest.raises(ValueError, match="hpo_hours"):
+        train("nonlinear", out, learned_data, hpo_hours=-1.0)
+    with pytest.raises(ValueError, match="hpo_trials"):
+        train("nonlinear", out, learned_data, hpo_trials=0)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # nobody is liquid enough to trade
+        {**SHORT_FOLDS, "selector.min_dollar_volume": 1e12},
+        # the train window (January, the dataset's first month) ends within the embargo of its
+        # first session, so the validation fit has no window; the universe is not empty
+        {
+            "folds.train_months": 2,
+            "folds.val_months": 3,
+            "folds.path_start": "2021-05-01",
+            "folds.path_end": "2021-05-31",
+            "folds.embargo_days": 25,
+            "selector.min_coverage_sessions": 5,
+        },
+    ],
+)
+def test_a_fold_with_nothing_to_fit_is_not_searched(learned_data, tmp_path, monkeypatch, overrides):
+    def no_search(*args, **kwargs):
+        raise AssertionError("a fold with nothing to fit was searched")
+
+    monkeypatch.setattr("ml4trading.hpo.search_fold", no_search)
+    run = train("nonlinear", tmp_path / "run", learned_data, overrides=overrides, hpo_trials=2)
+    for fold, fdir in _folds(run):
+        assert fold["hpo"] == {"timeout_s": None, "n_trials": 0, "best_number": None, "trials": []}
+        # as any fold with an empty validation fit: scored 0, run's own configuration deployed
+        assert fold["candidate_val_net_sharpe"] == [0.0] and fold["chosen"] == 0
+        assert fold["model_params"] == config.resolve("nonlinear", overrides).model
+        assert pd.read_parquet(fdir / "val" / "predictions.parquet").empty
+
+
+def test_a_rerun_clears_the_old_validation_outputs(learned_data, tmp_path):
+    out = tmp_path / "run"
+    asked = train("nonlinear", out, learned_data, overrides=SHORT_FOLDS, importance=True)
+    assert all((fdir / "val" / "importance.parquet").exists() for _, fdir in _folds(asked))
+    plain = train("nonlinear", out, learned_data, overrides=SHORT_FOLDS)
+    for _, fdir in _folds(plain):
+        assert sorted(p.name for p in (fdir / "val").iterdir()) == ["predictions.parquet"]
+
+
+def test_the_first_of_equal_candidates_is_chosen(learned_data, tmp_path):
+    # one rule picks both the choice and the validation that is kept: two candidates that tie
+    # leave the first
+    grid = {"model.alpha_ratio": [0.1, 0.1]}
+    run = train("linear", tmp_path / "run", learned_data, grid=grid, overrides=SHORT_FOLDS)
+    for fold, _ in _folds(run):
+        first, second = fold["candidate_val_net_sharpe"]
+        assert first == second and fold["chosen"] == 0
