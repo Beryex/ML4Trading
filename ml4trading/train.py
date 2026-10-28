@@ -20,8 +20,10 @@ boundary B (calendar: ``ml4trading.folds``):
    never ranked on; null for a model that fits no loss -- and ``val_diagnostics`` of the chosen
    candidate's validation book, ``ml4trading.diagnostics``), universe.json, predictions.parquet,
    val/predictions.parquet (the chosen candidate's scored validation rows, kept from the
-   validation pass, never refitted) and, for a model that fits one, the fitted estimator under
-   model/. With ``--importance`` that same validation fit is also scored for feature importance
+   validation pass, never refitted), val/daily.parquet (that candidate's validation book valued
+   once per session: ``session``, ``ret``, ``gross_ret``, so variants' daily returns can be
+   correlated and blended) and, for a model that fits one, the fitted estimator under model/.
+   With ``--importance`` that same validation fit is also scored for feature importance
    (``ml4trading.importance``) on those rows: val/importance.parquet, one row per feature. A
    fold's val/ and model/ directories are emptied before they are written, so a re-run into the
    same ``--out`` leaves no file of an earlier run.
@@ -198,7 +200,22 @@ class _Kept(NamedTuple):
     fit_prediction: np.ndarray | None
     book: pd.DataFrame
     positions: pd.DataFrame
+    daily: pd.DataFrame
     metrics: dict
+
+
+def _val_daily(daily: pd.DataFrame) -> pd.DataFrame:
+    """The daily returns of a validation book as val/daily.parquet keeps them. An empty book has
+    a column-less ``daily``; it is kept as an empty frame with the real columns' dtypes."""
+    if daily.empty:
+        return pd.DataFrame(
+            {
+                "session": pd.Series(dtype="datetime64[ns]"),
+                "ret": pd.Series(dtype="float64"),
+                "gross_ret": pd.Series(dtype="float64"),
+            }
+        )
+    return daily[["session", "ret", "gross_ret"]].reset_index(drop=True)
 
 
 def _check_grid(method: str, grid: dict | None) -> None:
@@ -345,7 +362,7 @@ def train(
         scores, r2s = [], []
         kept = None
         for index, (cand, result, preds) in enumerate(fits):
-            book, positions, _, metrics = score_book(
+            book, positions, daily, metrics = score_book(
                 preds, panel, periods, cand, benchmark=benchmark, daily_inputs=daily_inputs
             )
             scored = _scored_val(result, preds, panel, periods)
@@ -353,7 +370,9 @@ def train(
             scores.append(float(metrics.get("net_sharpe", 0.0)))
             r2s.append(_val_r2(result, scored, fit_prediction))
             if kept is None or scores[-1] > scores[kept.index]:  # the first best wins
-                kept = _Kept(index, cand, result, scored, fit_prediction, book, positions, metrics)
+                kept = _Kept(
+                    index, cand, result, scored, fit_prediction, book, positions, daily, metrics
+                )
         best, chosen = kept.index, kept.cfg
         fit_end = embargoed_end(fold.deploy[1], sessions, embargo)
         universe, result, preds = _fit_predict(
@@ -390,6 +409,7 @@ def train(
         kept.scored.drop(columns="open_px").to_parquet(
             fdir / "val" / "predictions.parquet", index=False
         )
+        _val_daily(kept.daily).to_parquet(fdir / "val" / "daily.parquet", index=False)
         artifact = None if kept.result is None else kept.result.artifact
         if importance and artifact is not None and len(kept.scored):
             table = importance_table(

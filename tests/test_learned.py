@@ -13,6 +13,7 @@ from ml4trading.backtest import backtest
 from ml4trading.config import TIMEZONE
 from ml4trading.data import all_symbols, load_bars, load_dividends
 from ml4trading.features import CALENDAR
+from ml4trading.metrics import sharpe
 from ml4trading.models import FoldResult, Frames, get_model
 from ml4trading.models.base import empty_predictions, rows_in
 from ml4trading.models.learned.base import EarlyStop, FitArtifact, LearnedModel
@@ -249,6 +250,50 @@ def test_the_kept_validation_is_the_chosen_candidates_not_the_last(learned_data,
         assert kept_first.equals(kept_last)
         other_fold = json.loads((other / "fold.json").read_text())
         assert other_fold["val_diagnostics"] == fold["val_diagnostics"]
+
+
+def test_validation_daily_returns_are_kept(learned_data, tmp_path):
+    run = train("linear", tmp_path / "run", learned_data, overrides=SHORT_FOLDS)
+    for fdir in sorted((run / "folds").iterdir()):
+        fold = json.loads((fdir / "fold.json").read_text())
+        daily = pd.read_parquet(fdir / "val" / "daily.parquet")
+        assert list(daily.columns) == ["session", "ret", "gross_ret"]
+        assert daily["session"].dtype.kind == "M" and daily["session"].is_monotonic_increasing
+        assert daily["session"].is_unique and len(daily) > 0
+        assert daily["ret"].dtype == daily["gross_ret"].dtype == np.float64
+        assert np.isfinite(daily[["ret", "gross_ret"]].to_numpy()).all()
+        # summarize computes net_sharpe from exactly this series
+        net_sharpe = fold["val_diagnostics"]["net_sharpe"]
+        assert sharpe(daily["ret"]) == pytest.approx(net_sharpe, abs=1e-12)
+
+
+def test_the_kept_daily_returns_are_the_chosen_candidates_not_the_last(learned_data, tmp_path):
+    # alpha_ratio 0.1 wins every fold; listed first or last, its daily returns are what is kept
+    runs = {}
+    for name, ratios in (("last", [0.01, 0.1]), ("first", [0.1, 0.01])):
+        grid = {"model.alpha_ratio": ratios}
+        runs[name] = train(
+            "linear", tmp_path / name, learned_data, grid=grid, overrides=SHORT_FOLDS
+        )
+    for fdir in sorted((runs["first"] / "folds").iterdir()):
+        fold = json.loads((fdir / "fold.json").read_text())
+        kept_first = pd.read_parquet(fdir / "val" / "daily.parquet")
+        kept_last = pd.read_parquet(runs["last"] / "folds" / fdir.name / "val" / "daily.parquet")
+        assert kept_first.equals(kept_last)
+        best = max(fold["candidate_val_net_sharpe"])
+        assert sharpe(kept_first["ret"]) == pytest.approx(best, abs=1e-12)
+
+
+def test_an_empty_validation_book_keeps_an_empty_daily_frame(learned_data, tmp_path):
+    # momentum selects nobody on this data: the validation book is empty
+    run = train("momentum", tmp_path / "run", learned_data, overrides=SHORT_FOLDS)
+    for fdir in sorted((run / "folds").iterdir()):
+        assert json.loads((fdir / "universe.json").read_text()) == []
+        daily = pd.read_parquet(fdir / "val" / "daily.parquet")
+        assert list(daily.columns) == ["session", "ret", "gross_ret"]
+        assert daily.empty
+        assert daily["session"].dtype.kind == "M"
+        assert daily["ret"].dtype == daily["gross_ret"].dtype == np.float64
 
 
 def test_scored_val_drops_unlabelled_rows(frames):

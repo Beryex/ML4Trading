@@ -240,6 +240,10 @@ what the chosen candidate's validation pass produced (nothing is refitted):
 - `val/predictions.parquet`: the scored validation rows -- `period, symbol, prediction`, the
   realized return `y` and the `label` the fit was trained on (rows without a realized return are
   not scored);
+- `val/daily.parquet`: that same validation book valued once per session -- `session`, the net
+  daily return `ret` and `gross_ret` (before the period's costs); `ret` is the series behind
+  `val_diagnostics["net_sharpe"]`, so variants' validation returns can be correlated and
+  blended. A fold whose validation book is empty keeps an empty frame with those columns;
 - `val_diagnostics` in `fold.json`: that validation book taken apart -- the per-period
   information coefficient (Spearman correlation of prediction and return) with its spread,
   t-statistic and hit rate; the long and short legs' P&L before and after costs; how often a held

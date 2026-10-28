@@ -329,7 +329,8 @@ def test_a_rerun_clears_the_old_validation_outputs(learned_data, tmp_path):
     assert all((fdir / "val" / "importance.parquet").exists() for _, fdir in _folds(asked))
     plain = train("nonlinear", out, learned_data, overrides=SHORT_FOLDS)
     for _, fdir in _folds(plain):
-        assert sorted(p.name for p in (fdir / "val").iterdir()) == ["predictions.parquet"]
+        names = sorted(p.name for p in (fdir / "val").iterdir())
+        assert names == ["daily.parquet", "predictions.parquet"]  # no importance.parquet left
 
 
 def test_a_rerun_clears_the_old_fitted_model(learned_data, tmp_path):
