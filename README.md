@@ -103,17 +103,33 @@ universe decides what is traded.
 - **Slow features** (`--set model.extra_features=true`; both models, off by default): thirteen
   cross-sectional features from the literature, built from the same bars
   (`ml4trading/features/slow.py`) and added after the others: `mom_12_1` and `mom_6_1`
-  (Jegadeesh & Titman 1993), `mom_1m` (Jegadeesh 1990), `high_52w` (George & Hwang 2004),
+  (Jegadeesh & Titman 1993, skipping the last month as Fama & French 1996 and Carhart 1997 do),
+  `mom_1m` (Jegadeesh 1990), `high_52w` (George & Hwang 2004),
   `max_21` (Bali, Cakici & Whitelaw 2011), `beta_252` (Frazzini & Pedersen 2014), `ivol_63`
   (Ang, Hodrick, Xing & Zhang 2006), `resid_mom_12_1` (Blitz, Huij & Martens 2011), `amihud_21`
   (Amihud 2002), `rskew_21` (Amaya, Christoffersen, Jacobs & Vasquez 2015), `overnight_21` and
   `intraday_21` (Lou, Polk & Skouras 2019), and `volatility_252`. Each is a ratio, a return or a
   dollar volume, so a split leaves it unchanged (a test holds it), and each is NaN until its
-  window of the stock's own sessions is full -- the year-long ones for a stock's first 252
-  sessions. The market-relative ones (`beta_252`, `ivol_63`, `resid_mom_12_1`) are measured
-  against VOO on the sessions both have. They are columns like any other: `cs_rank` ranks them,
-  and a feature set may name them (refused by name unless `extra_features` is on). The option
-  is built into the run's frames, so it is fixed for a run and cannot be searched in a grid.
+  window of the stock's own sessions is full -- the year-long ones for a stock's first 253 rows
+  (254 for `resid_mom_12_1`). The market-relative ones (`beta_252`, `ivol_63`, `resid_mom_12_1`)
+  are measured against VOO on the sessions both have. They are columns like any other: `cs_rank`
+  ranks them, and a feature set may name them (refused by name unless `extra_features` is on).
+  The option is built into the run's frames, so it is fixed for a run and cannot be searched in
+  a grid.
+- **Horizon label** (`--set model.horizon=5`, in sessions, with `model.horizon_scale`, `sum` or
+  `mean`; both models, `1` and `sum` by default): the fit looks several sessions ahead instead
+  of one. A row's label `y_h` is the sum (or mean) of the stock's next `h` one-session returns,
+  NaN unless all `h` exist: a row near the stock's data end, or with a missing return inside its
+  window, has no label and is never a partial sum. A longer label reaches past the fit window,
+  so the fit leaves out the rows whose label is not realized by the first session after the
+  window (the purge of López de Prado 2018, "Advances in Financial Machine Learning", ch. 7).
+  Under `sum` the prediction is an `h`-session expectation, so the trader's cost gate compares
+  it with one round trip, the comparison for a position held about `h` sessions (Gârleanu &
+  Pedersen 2013, "Dynamic Trading with Predictable Returns and Transaction Costs"); `mean` keeps
+  per-session units. The validation scoring reads the same label, so the last `h - 1` scored
+  periods' labels exit after the validation window: they are NaN, and the R², `r2_mse`,
+  `perm_mse` and the early-stopping set skip them. The IC and the book always use the
+  one-session `y`. It is a fit-time option, so a grid may search it.
 - **Volatility-scaled target** (`--set model.risk_adjust=vol` or `vol_return`, with
   `model.vol_window`, 63 sessions; both models, `none` by default): the trader ranks and weights
   names by |prediction|, so a model fitted on the raw return favours the volatile names. Here the
@@ -130,7 +146,10 @@ universe decides what is traded.
   may search it.
 - **Prediction smoothing** (`--set model.smooth_halflife=3`, in sessions; both models, `0` =
   off by default): a one-session forecast moves with the day's noise, so the book trades names in
-  and out. With a half-life `H` the traded prediction is, last of all -- after any volatility
+  and out, which costs: with trading costs the optimal position moves only part of the way
+  toward its forecast (Gârleanu & Pedersen 2013), and costs weigh most on the anomalies that
+  turn over most (Novy-Marx & Velikov 2016, "A Taxonomy of Anomalies and Their Trading Costs").
+  With a half-life `H` the traded prediction is, last of all -- after any volatility
   scaling -- each stock's exponential average of its own predictions, `s = (1 - a) s_prev + a x`
   with `a = 1 - 0.5 ** (1 / H)`, seeded at its first prediction. The fold predicts `3 * ceil(H)`
   sessions before its window as well, so the average has history at the window's first session,
@@ -179,8 +198,9 @@ universe decides what is traded.
   Sharpe like any method's. Each fold also records every candidate's out-of-sample R², against
   the constant fitted on its training rows (`candidate_val_r2` in `fold.json`); it is never
   ranked on. R² (and `r2_mse` below) is measured in each run's own label units, so it compares
-  only across runs with the same `model.label` and `model.risk_adjust`; net Sharpe and IC compare across label
-  variants. For `nonlinear`, a per-fold search can take a grid's place (see below).
+  only across runs with the same `model.label`, `model.risk_adjust`, `model.horizon`,
+  `model.horizon_scale` and `model.vol_window`; net Sharpe and IC compare across label variants.
+  For `nonlinear`, a per-fold search can take a grid's place (see below).
 
 ```bash
 python -m ml4trading.train --method linear --grid grids/linear.yaml --out runs/linear
@@ -249,8 +269,10 @@ A fold's validation Sharpe says how a candidate did, not why. For every fold, `t
 what the chosen candidate's validation pass produced (nothing is refitted):
 
 - `val/predictions.parquet`: the scored validation rows -- `period, symbol, prediction`, the
-  realized return `y` and the `label` the fit was trained on (rows without a realized return are
-  not scored);
+  realized one-session return `y` and `label` (rows without a realized return are not scored).
+  `prediction` is the value that was traded, risk-scaled and smoothed if either option is on.
+  `label` is in the fit's units, the target the fit trained on: NaN where the horizon label is
+  unrealized by the end of the window, or where the row has no volatility;
 - `val/daily.parquet`: that same validation book valued once per session -- `session`, the net
   daily return `ret` and `gross_ret` (before the period's costs); `ret` is the series behind
   `val_diagnostics["net_sharpe"]`. A fold whose validation book is empty keeps an empty frame

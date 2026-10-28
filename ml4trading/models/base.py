@@ -29,6 +29,11 @@ checks:
 return of the period, same units as ``y``) over ``predict_window``; a missing (period, symbol)
 is simply not traded. The trainer keeps only the fold's universe.
 
+A learned model with ``risk_adjust`` ``vol`` predicts z x the period's median sigma, z being its
+output on the volatility-scaled label: the prediction is in return units, but it is not the
+name's own expected return (all names of a period share the multiplier, so the ranking follows
+z). With ``vol_return`` it is z x the row's own sigma.
+
 A learned model with ``horizon`` > 1 and ``horizon_scale`` ``sum`` predicts the return over its
 horizon, not over one period: the trader's cost gate then compares an h-session expectation with
 one round trip, the economically meaningful comparison for a position meant to be held about h

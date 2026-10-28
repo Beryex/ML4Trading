@@ -116,9 +116,10 @@ def _scored_val(
     universe's, so a period's mean is the pool's cross-section the fit demeaned over. Only rows
     with a finite ``y`` count: a symbol's last overnight period has none (and so no exit price),
     and neither the IC, the R² nor the cost-gate replay can use it. A row keeps its one-period
-    ``y`` whatever the horizon, so the IC and the book are the same at every horizon; its
-    ``label`` is NaN where the horizon label is unknown or exits after the first session
-    following the last of ``periods`` (with ``horizon`` > 1, the last periods')."""
+    ``y`` whatever the horizon: the IC and the book are measured against that same ``y`` at every
+    horizon, while the R² reads ``label``. A row's ``label`` is NaN where the horizon label is
+    unknown or exits after the first session following the last of ``periods`` (with ``horizon``
+    > 1, the last periods')."""
     transform = None if result is None else result.label_transform
     horizon, scale = (1, "sum") if result is None else (result.horizon, result.horizon_scale)
     scaling = ("none", 63) if result is None else (result.risk_adjust, result.vol_window)

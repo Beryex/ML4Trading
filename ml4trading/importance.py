@@ -10,7 +10,10 @@ Two kinds of measure, which answer different questions:
   fit, and on rows the fit was not trained on (under HPO they also chose its stopping round and
   parameters). ``perm_mse`` is the rise in the mean squared error against the label; ``perm_ic``
   is the fall in the mean per-period information coefficient
-  (``ml4trading.diagnostics.period_ic``) against the realized return.
+  (``ml4trading.diagnostics.period_ic``) against the realized return. Both read the model's own
+  raw output, in the units the fit trained on: under ``risk_adjust`` ``vol_return`` or with
+  smoothing, the IC that ``perm_ic`` starts from therefore differs from
+  ``val_diagnostics.ic_mean``, which is the traded prediction's.
 
 ``linear`` fills a missing value with its period's median, recomputed at prediction time over
 the rows it is handed: here the scored rows only, not the fit's own.

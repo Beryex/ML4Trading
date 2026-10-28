@@ -10,14 +10,16 @@ on, so that the label transform and the unlabelled rows are handled once for eve
 
 The label is the horizon label (``ml4trading.models.learned.horizon``): the return over the next
 ``horizon`` sessions, or ``horizon: 1``, the next session's, exactly as before. A fit uses only
-the rows whose label is realized by the first session after its window, and so does the
-early-stopping set after the last of its periods.
+the rows whose label is realized by the first session after its window. With ``horizon`` > 1 so
+does the early-stopping set, after the last of its periods; at ``horizon: 1`` that set is not
+bounded by its labels' exits, as it never was.
 
 With ``risk_adjust`` ``vol`` or ``vol_return`` the fit trains on that label divided by the row's
 trailing volatility (``ml4trading.models.learned.risk_adjust``) and the prediction is scaled back
-to the units of a return, so the trader ranks and weights by forecast risk-adjusted return. The
-rows without a volatility are left out of the fit, of the early-stopping set and of the scoring,
-and predict NaN.
+to the units of a return: by the period's median volatility under ``vol``, so the trader ranks
+and weights by forecast risk-adjusted return; by the row's own volatility under ``vol_return``,
+a per-name return forecast. The rows without a volatility are left out of the fit, of the
+early-stopping set and of the scoring, and predict NaN.
 
 With ``smooth_halflife`` > 0 the traded prediction is, last of all, each symbol's exponential
 average of those predictions over its recent rows (``ml4trading.models.learned.smoothing``). The
@@ -309,13 +311,14 @@ class LearnedModel(Model):
     ) -> tuple[pd.DataFrame, np.ndarray, EarlyStop]:
         """The early-stopping set: the rows of ``early_stop.periods`` x ``early_stop.symbols``
         with a label (a symbol's last overnight period has none), and their label through the
-        fold's ``transform`` (``ml4trading.models.learned.horizon.window_labels``). A
-        ``horizon`` label that exits after the first session following the last of the periods
-        is no label, as in the validation scoring. As there, the transform is applied to every
-        pool row of those periods, so a period's mean is the pool's cross-section the fit
-        demeaned over, and only then taken at the evaluation rows. With ``sigma`` (row-aligned
-        with ``panel``) the label is divided by it first, as in the fit; a row without a sigma
-        is no label. ``X`` is indexed by (period, symbol), row-aligned with ``panel``."""
+        fold's ``transform`` (``ml4trading.models.learned.horizon.window_labels``). With
+        ``horizon`` > 1 a label that exits after the first session following the last of the
+        periods is no label, as in the validation scoring (at ``horizon: 1`` a label is not
+        bounded by its exit). As there, the transform is applied to every pool row of those
+        periods, so a period's mean is the pool's cross-section the fit demeaned over, and only
+        then taken at the evaluation rows. With ``sigma`` (row-aligned with ``panel``) the label
+        is divided by it first, as in the fit; a row without a sigma is no label. ``X`` is
+        indexed by (period, symbol), row-aligned with ``panel``."""
         label = window_labels(panel, early_stop.periods, horizon, horizon_scale, transform, sigma)
         rows = np.isfinite(label) & panel["symbol"].isin(set(early_stop.symbols)).to_numpy()
         if not rows.any():

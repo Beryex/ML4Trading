@@ -8,8 +8,9 @@ a year, 126 half a year, 63 a quarter, 21 a month).
 
 The features, with their sources:
 
-- ``mom_12_1`` = close(d-21) / close(d-252) - 1 (Jegadeesh & Titman 1993);
-- ``mom_6_1`` = close(d-21) / close(d-126) - 1 (Jegadeesh & Titman 1993);
+- ``mom_12_1`` = close(d-21) / close(d-252) - 1 (Jegadeesh & Titman 1993; the last month is
+  skipped as Fama & French 1996 and Carhart 1997 do);
+- ``mom_6_1`` = close(d-21) / close(d-126) - 1 (the same sources);
 - ``mom_1m`` = close(d) / close(d-21) - 1, the one-month reversal (Jegadeesh 1990);
 - ``high_52w`` = close / the largest of the last 252 closes (George & Hwang 2004);
 - ``max_21`` = the largest daily return of the last 21 sessions (Bali, Cakici & Whitelaw 2011);
@@ -26,6 +27,11 @@ The features, with their sources:
 - ``intraday_21`` = the sum over 21 sessions of log(close / open) (Lou, Polk & Skouras 2019);
 - ``volatility_252`` = the std of the daily returns over 252 sessions, the scale of several of
   the above.
+
+The windows and the benchmarks are this project's choices and can differ from the cited papers'
+exact constructions: the residuals here are against VOO, where Ang et al. (and Blitz et al.) use
+Fama-French factors; ``amihud_21`` averages 21 sessions, where Amihud averages a year;
+``rskew_21`` uses 30-minute intraday returns, where Amaya et al. use higher-frequency ones.
 
 Every feature is a ratio, a return or a dollar volume, so none moves when one stock's prices are
 multiplied and its volume divided by the same factor (``tests/test_slow_features.py`` holds it):
@@ -93,9 +99,10 @@ SLOW_FEATURES = (
     "volatility_252",
 )
 
-#: Window lengths, in sessions. The values are those of the sources: Jegadeesh & Titman (1993)
-#: rank on 6 and 12 months skipping the last; George & Hwang (2004) use the 52-week high; the
-#: remaining windows are the table's, 21 sessions to the month.
+#: Window lengths, in sessions: this project's choice, 21 sessions to the month, 63 to the
+#: quarter, 126 to the half-year, 252 to the year. Jegadeesh & Titman (1993) study formation
+#: periods of 3 to 12 months; skipping the last month follows Fama & French (1996) and Carhart
+#: (1997); George & Hwang (2004) use the 52-week high.
 YEAR, HALF_YEAR, QUARTER, MONTH = 252, 126, 63, 21
 #: The residual momentum window: the sessions d-252..d-21, inclusive (Blitz, Huij & Martens 2011
 #: skip the last month of a year's residuals).

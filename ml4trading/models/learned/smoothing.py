@@ -1,8 +1,12 @@
 """Prediction smoothing: ``smooth_halflife`` averages a symbol's forecasts over its recent rows.
 
 A one-session forecast moves with the day's noise, so the book that follows it trades names in
-and out. With ``smooth_halflife`` ``H`` > 0 (sessions; 0 is off) the model's traded prediction
-is instead the exponential average of the symbol's own predictions, the newest weighing most:
+and out, and trading costs make that expensive: with them the optimal position moves only part
+of the way toward its forecast (Gârleanu & Pedersen 2013, "Dynamic Trading with Predictable
+Returns and Transaction Costs"), and costs weigh most on the anomalies that turn over most
+(Novy-Marx & Velikov 2016, "A Taxonomy of Anomalies and Their Trading Costs"). With
+``smooth_halflife`` ``H`` > 0 (sessions; 0 is off) the model's traded prediction is instead the
+exponential average of the symbol's own predictions, the newest weighing most:
 
     s[t] = (1 - alpha) * s[t-1] + alpha * x[t],    alpha = 1 - 0.5 ** (1 / H),
 
@@ -14,8 +18,10 @@ The average needs the rows before the predict window, so a fold predicts ``LOOKB
 x ``ceil(H)`` sessions before the window's first session as well (fewer where the data starts
 sooner) and returns only the window's rows. The lookback rows are scaled like the window's
 (``ml4trading.models.learned.risk_adjust``) before they are averaged, and their predictions are
-the fitted model's own on earlier sessions, which a prediction may read. After the lookback the
-seed's weight at the window's first row is 0.5 ** 3 = 12.5 %.
+the fitted model's own on earlier sessions, which a prediction may read. For a symbol with a row
+on every lookback session the seed's weight at the window's first row is 0.5 ** (3 ceil(H) / H),
+at most 12.5 %; a symbol with fewer rows there (it starts inside the lookback, or has gaps) has
+fewer steps to forget the seed, and so more.
 
 The average runs over the symbol's consecutive panel rows, not over calendar sessions: a session
 the symbol did not trade has no row, and the average steps from the row before the gap to the
@@ -35,9 +41,10 @@ import pandas as pd
 
 from ml4trading.models.learned.horizon import symbol_codes
 
-#: How many half-lives of rows before the predict window are read. After this many the seed has
-#: 0.5 ** 3 = 12.5 % of the weight left, so the lookback is long enough for the average to forget
-#: where it started, and short enough to cost three half-lives of extra predictions per fold.
+#: How many half-lives of rows before the predict window are read. This project's own choice (no
+#: public source fixes one): three half-lives leave the seed 0.5 ** 3 = 12.5 % of the weight at
+#: the window's first row at most (see the module), enough for the average to forget where it
+#: started, for the cost of three half-lives of extra predictions per fold.
 LOOKBACK_HALFLIVES = 3
 
 

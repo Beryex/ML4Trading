@@ -153,10 +153,11 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             "extra_features": False,
             # what the fit's label is divided by: "none", the symbol's trailing volatility ("vol":
             # predictions come back times the period's median volatility, so the trader ranks by
-            # the risk-adjusted forecast; "vol_return": times each name's own), over the last
-            # vol_window sessions (Moskowitz, Ooi & Pedersen 2012 scale by ex-ante volatility; Ang,
-            # Hodrick, Xing & Zhang 2006 measure it over a short trailing window; 63 = a quarter,
-            # as the slow features' ivol_63)
+            # the risk-adjusted forecast; "vol_return": times each name's own), over vol_window
+            # rows, ending two rows before the row (LABEL_LAG in models/learned/risk_adjust.py).
+            # Moskowitz, Ooi & Pedersen 2012 scale by an ex-ante volatility estimate of about 60
+            # days; Ang, Hodrick, Xing & Zhang 2006 measure it over a short trailing window; 63 =
+            # a quarter, as the slow features' ivol_63
             "risk_adjust": "none",
             "vol_window": 63,
             "feature_set": "all",  # every column; or a name in ml4trading/features/feature_sets/
@@ -193,10 +194,11 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             "extra_features": False,
             # what the fit's label is divided by: "none", the symbol's trailing volatility ("vol":
             # predictions come back times the period's median volatility, so the trader ranks by
-            # the risk-adjusted forecast; "vol_return": times each name's own), over the last
-            # vol_window sessions (Moskowitz, Ooi & Pedersen 2012 scale by ex-ante volatility; Ang,
-            # Hodrick, Xing & Zhang 2006 measure it over a short trailing window; 63 = a quarter,
-            # as the slow features' ivol_63)
+            # the risk-adjusted forecast; "vol_return": times each name's own), over vol_window
+            # rows, ending two rows before the row (LABEL_LAG in models/learned/risk_adjust.py).
+            # Moskowitz, Ooi & Pedersen 2012 scale by an ex-ante volatility estimate of about 60
+            # days; Ang, Hodrick, Xing & Zhang 2006 measure it over a short trailing window; 63 =
+            # a quarter, as the slow features' ivol_63
             "risk_adjust": "none",
             "vol_window": 63,
             "num_leaves": 31,
