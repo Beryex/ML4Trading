@@ -3,11 +3,16 @@
 A subclass declares its parameters (``PARAMS``) and its training loss, and implements ``_fit``,
 which turns a fold's fit rows into a ``FitArtifact``; everything else -- which symbols, which
 rows, the label, causality -- is here, so the methods cannot differ on it.
+
+A fit may also be given a validation evaluation set (``EarlyStop``): a booster then stops on its
+squared error there and keeps the best round. The set is built here, in the units the fit trains
+on, so that the label transform and the unlabelled rows are handled once for every method.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
@@ -21,12 +26,28 @@ from ml4trading.models.learned.labels import fit_label_transform
 from ml4trading.models.learned.losses import baseline_prediction
 
 
+@dataclass(frozen=True)
+class EarlyStop:
+    """Where a fit stops early: on the squared error over the panel rows of ``periods`` x
+    ``symbols`` that have a label. It trains for at most ``max_rounds`` rounds and stops once the
+    error has not improved for ``patience`` rounds."""
+
+    periods: tuple[pd.Timestamp, ...]
+    symbols: tuple[str, ...]
+    max_rounds: int
+    patience: int
+
+
 class FitArtifact(ABC):
     """A fold's fitted estimator. ``predict`` takes features indexed by (period, symbol) with
     (at least) ``feature_names()`` as columns; ``save`` writes ``FILENAME`` into a directory and
     ``load`` reads it back, predicting identically."""
 
     FILENAME: ClassVar[str]
+    #: Set by an artifact fitted with early stopping: the round it kept (1-based) and the
+    #: squared error on the evaluation set at that round.
+    best_iteration: int | None = None
+    eval_mse: float | None = None
 
     @abstractmethod
     def predict(self, X: pd.DataFrame) -> np.ndarray: ...
@@ -70,9 +91,17 @@ class LearnedModel(Model):
         return "raw"
 
     @abstractmethod
-    def _fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray) -> FitArtifact:
+    def _fit(
+        self,
+        X_fit: pd.DataFrame,
+        y_fit: np.ndarray,
+        eval_set: tuple[pd.DataFrame, np.ndarray, EarlyStop] | None = None,
+    ) -> FitArtifact:
         """The estimator fitted on the fold's labelled fit rows (``X_fit`` indexed by
-        (period, symbol)); ``y_fit`` is their label after the model's ``label_kind``."""
+        (period, symbol)); ``y_fit`` is their label after the model's ``label_kind``.
+        ``eval_set`` is None, or the features and labels (in the same units as ``y_fit``) of the
+        evaluation rows and the ``EarlyStop`` that chose them: a model that cannot stop early
+        refuses it."""
 
     def symbol_pool(self, available: list[str]) -> list[str]:
         absent = [e for e in FEATURE_ETFS if e not in set(available)]
@@ -115,7 +144,28 @@ class LearnedModel(Model):
         exits = panel.groupby("symbol", observed=True, sort=False)["session"].shift(-1)
         return (exits <= later.min()).to_numpy()
 
-    def fit_predict_fold(self, frames: Frames, fit_window, predict_window) -> FoldResult:
+    @staticmethod
+    def _evaluation_rows(
+        panel: pd.DataFrame, X: pd.DataFrame, transform, early_stop: EarlyStop
+    ) -> tuple[pd.DataFrame, np.ndarray, EarlyStop]:
+        """The early-stopping set: the rows of ``early_stop.periods`` x ``early_stop.symbols``
+        with a finite ``y`` (a symbol's last overnight period has none), and their label through
+        the fold's ``transform``. As in the validation scoring, the transform is applied to every
+        pool row of those periods, so a period's mean is the pool's cross-section the fit
+        demeaned over, and only then taken at the evaluation rows. ``X`` is indexed by
+        (period, symbol), row-aligned with ``panel``."""
+        y = panel["y"].to_numpy(dtype=float)
+        labelled = panel["period"].isin(set(early_stop.periods)).to_numpy() & np.isfinite(y)
+        label = np.full(len(panel), np.nan)
+        label[labelled] = transform.apply(y[labelled], panel["period"].to_numpy()[labelled])
+        rows = labelled & panel["symbol"].isin(set(early_stop.symbols)).to_numpy()
+        if not rows.any():
+            raise ValueError("early stopping: no labelled evaluation row")
+        return X[rows], label[rows], early_stop
+
+    def fit_predict_fold(
+        self, frames: Frames, fit_window, predict_window, early_stop: EarlyStop | None = None
+    ) -> FoldResult:
         panel = frames.panel
         X = frames.X.set_axis(
             pd.MultiIndex.from_arrays(
@@ -132,7 +182,10 @@ class LearnedModel(Model):
         y_raw, period = panel["y"].to_numpy(dtype=float)[fit], panel["period"].to_numpy()[fit]
         transform = fit_label_transform(self.label_kind, y_raw, period)
         y_fit = transform.apply(y_raw, period)
-        artifact = self._fit(X[fit], y_fit)
+        eval_set = (
+            None if early_stop is None else self._evaluation_rows(panel, X, transform, early_stop)
+        )
+        artifact = self._fit(X[fit], y_fit, eval_set)
 
         rows = rows_in(panel, predict_window)
         at = panel.index.get_indexer(rows.index)
@@ -151,4 +204,6 @@ class LearnedModel(Model):
             baseline_prediction(y_fit, self.loss),
             float(np.mean(y_fit)),
             transform,
+            artifact.best_iteration,
+            artifact.eval_mse,
         )

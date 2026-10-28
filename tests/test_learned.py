@@ -15,6 +15,7 @@ from ml4trading.data import all_symbols, load_bars, load_dividends
 from ml4trading.features import CALENDAR
 from ml4trading.models import FoldResult, Frames, get_model
 from ml4trading.models.base import empty_predictions, rows_in
+from ml4trading.models.learned.base import EarlyStop
 from ml4trading.models.learned.labels import LabelTransform
 from ml4trading.models.learned.linear import impute_by_period
 from ml4trading.models.learned.losses import baseline_prediction, loss_value, oos_r2
@@ -318,9 +319,9 @@ def _fit_capturing(monkeypatch, frames, **params):
     seen = {}
     real = NonlinearModel._fit
 
-    def spy(self, X_fit, y_fit):
+    def spy(self, X_fit, y_fit, eval_set=None):
         seen["X"], seen["y"] = X_fit, np.array(y_fit)
-        return real(self, X_fit, y_fit)
+        return real(self, X_fit, y_fit, eval_set)
 
     monkeypatch.setattr(NonlinearModel, "_fit", spy)
     result = _model("nonlinear", **params).fit_predict_fold(frames, FIT, JUNE)
@@ -803,3 +804,169 @@ def test_default_categorical_parameters_change_nothing(frames, monkeypatch):
         plain.predict(X[plain.feature_name()], num_threads=8), result.artifact.predict(X)
     )
     assert plain.model_to_string() == result.artifact.booster.model_to_string()
+
+
+POOL = ("AAA", "BBB", "CCC")
+
+
+def _periods_of(f, window):
+    return tuple(pd.Timestamp(p) for p in sorted(rows_in(f.panel, window)["period"].unique()))
+
+
+def _early_stopping_capturing(monkeypatch, f, early_stop, **params):
+    """A nonlinear fold's result under ``early_stop`` with the eval set its ``_fit`` was given."""
+    seen = {}
+    real = NonlinearModel._fit
+
+    def spy(self, X_fit, y_fit, eval_set=None):
+        seen["eval_set"] = eval_set
+        return real(self, X_fit, y_fit, eval_set)
+
+    monkeypatch.setattr(NonlinearModel, "_fit", spy)
+    result = _model("nonlinear", **params).fit_predict_fold(f, FIT, JUNE, early_stop=early_stop)
+    return result, seen["eval_set"]
+
+
+@pytest.mark.parametrize(
+    "label, symbols",
+    [("raw", POOL), ("demean", ("AAA", "BBB"))],
+)
+def test_early_stopping_records_its_best_iteration(frames, label, symbols):
+    f = frames["nonlinear"]
+    periods = _periods_of(f, JUNE)
+    stop = EarlyStop(periods, symbols, 50, 5)
+    result = _model("nonlinear", label=label).fit_predict_fold(f, FIT, JUNE, early_stop=stop)
+    assert 1 <= result.best_iteration <= 50
+    assert result.best_iteration == result.artifact.best_iteration
+    # the evaluation labels: demeaned over the pool's rows of the period (all three names), then
+    # taken at the evaluation rows (here two of them)
+    panel = f.panel
+    pool = panel[panel["period"].isin(set(periods)) & np.isfinite(panel["y"].to_numpy(float))]
+    label_ = (
+        pool["y"] - pool.groupby("period")["y"].transform("mean")
+        if label == "demean"
+        else pool["y"]
+    )
+    rows = pool.assign(label=label_)[lambda d: d["symbol"].isin(symbols)]
+    both = rows.merge(result.predictions, on=["period", "symbol"])
+    assert len(both) == len(rows) > 0
+    assert result.eval_mse == pytest.approx(
+        np.mean((both["label"] - both["prediction"]) ** 2), rel=1e-6
+    )
+
+
+def test_early_stopping_drops_unlabelled_rows(frames, monkeypatch):
+    f = frames["nonlinear"]
+    last = f.panel["period"].max()
+    assert f.panel.loc[f.panel["period"] == last, "y"].isna().all()  # no next open to exit at
+    june = _periods_of(f, JUNE)
+    result, eval_set = _early_stopping_capturing(
+        monkeypatch, f, EarlyStop((*june, last), POOL, 50, 5)
+    )
+    X_eval, y_eval, _ = eval_set
+    assert np.isfinite(y_eval).all()
+    assert last not in set(X_eval.index.get_level_values("period"))
+    assert np.isfinite(result.eval_mse)
+    # the unlabelled period is as if it were not asked for
+    without = _model("nonlinear").fit_predict_fold(f, FIT, JUNE, EarlyStop(june, POOL, 50, 5))
+    assert (result.best_iteration, result.eval_mse) == (without.best_iteration, without.eval_mse)
+
+
+@pytest.mark.parametrize(
+    "periods, symbols",
+    [
+        ("last", POOL),  # the only period has no label
+        ("june", ("ZZZ",)),  # no such name in the pool
+        ("june", ()),
+        ("none", POOL),
+    ],
+)
+def test_no_evaluation_row_is_refused(frames, periods, symbols):
+    f = frames["nonlinear"]
+    chosen = {
+        "last": (f.panel["period"].max(),),
+        "june": _periods_of(f, JUNE),
+        "none": (),
+    }[periods]
+    with pytest.raises(ValueError, match="early stopping: no labelled evaluation row"):
+        _model("nonlinear").fit_predict_fold(f, FIT, JUNE, EarlyStop(chosen, symbols, 50, 5))
+
+
+def test_linear_refuses_early_stopping(frames):
+    f = frames["linear"]
+    stop = EarlyStop(_periods_of(f, JUNE), POOL, 50, 5)
+    with pytest.raises(ValueError, match="linear.*early stopping"):
+        _model("linear").fit_predict_fold(f, FIT, JUNE, early_stop=stop)
+
+
+def test_without_early_stopping_nothing_changes(frames, monkeypatch):
+    import lightgbm as lgb
+
+    real_train = lgb.train
+    calls = []
+
+    def spy_train(params, train_set, *args, **kwargs):
+        calls.append((dict(params), args, kwargs))
+        return real_train(params, train_set, *args, **kwargs)
+
+    monkeypatch.setattr(lgb, "train", spy_train)
+    f = frames["nonlinear"]
+    plain = _model("nonlinear").fit_predict_fold(f, FIT, JUNE)
+    params, args, kwargs = calls[-1]
+    assert "metric" not in params and args == ()
+    assert kwargs == {"num_boost_round": 100}  # n_estimators; no valid_sets, no callbacks
+    assert plain.best_iteration is None and plain.eval_mse is None
+    assert plain.artifact.best_iteration is None
+
+    stop = EarlyStop(_periods_of(f, JUNE), POOL, 50, 5)
+    stopped = _model("nonlinear").fit_predict_fold(f, FIT, JUNE, early_stop=stop)
+    params_es, args_es, kwargs_es = calls[-1]
+    assert params_es == {**params, "metric": "l2"} and args_es == ()
+    assert set(kwargs_es) == {"num_boost_round", "valid_sets", "callbacks"}
+    assert kwargs_es["num_boost_round"] == 50 and len(kwargs_es["valid_sets"]) == 1
+    assert len(kwargs_es["callbacks"]) == 1
+    assert stopped.best_iteration is not None and stopped.eval_mse is not None
+
+
+def test_early_stopping_reads_the_fit_columns(frames, monkeypatch):
+    f = frames["nonlinear"]
+    stop = EarlyStop(_periods_of(f, JUNE), POOL, 50, 5)
+    result, eval_set = _early_stopping_capturing(monkeypatch, f, stop, stock_id="drop")
+    X_eval, _, given = eval_set
+    assert given is stop
+    # the evaluation frame holds every feature column; LightGBM was handed only the fit's
+    assert "stock_id" in X_eval.columns
+    assert result.artifact.feature_names() == [c for c in f.X.columns if c != "stock_id"]
+    assert result.best_iteration >= 1
+
+
+@pytest.mark.parametrize("keep_training_booster", [False, True])
+def test_a_saved_early_stopped_fit_predicts_the_same(
+    frames, tmp_path, monkeypatch, keep_training_booster
+):
+    import lightgbm as lgb
+
+    # lgb.train drops the rounds past the best one by default; kept, the booster holds them, and
+    # the artifact itself must cut at the best round
+    real_train = lgb.train
+    monkeypatch.setattr(
+        lgb,
+        "train",
+        lambda *a, **kw: real_train(*a, **kw, keep_training_booster=keep_training_booster),
+    )
+    f = frames["nonlinear"]
+    stop = EarlyStop(_periods_of(f, JUNE), POOL, 50, 5)
+    artifact = _model("nonlinear").fit_predict_fold(f, FIT, JUNE, early_stop=stop).artifact
+    best, X = artifact.best_iteration, _keyed(f, JUNE)
+    assert (artifact.booster.num_trees() > best) == keep_training_booster
+    assert np.array_equal(
+        artifact.predict(X),
+        np.asarray(artifact.booster.predict(X, num_iteration=best, num_threads=8)),
+    )
+    if keep_training_booster:  # the extra rounds would change the prediction
+        every_round = artifact.booster.predict(X, num_iteration=-1, num_threads=8)
+        assert not np.array_equal(artifact.predict(X), every_round)
+    artifact.save(tmp_path / "model")
+    loaded = type(artifact).load(tmp_path / "model")
+    assert loaded.booster.num_trees() == best  # the file keeps the best rounds' trees only
+    assert np.array_equal(loaded.predict(X), artifact.predict(X))

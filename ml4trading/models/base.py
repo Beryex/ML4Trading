@@ -57,7 +57,10 @@ class FoldResult:
     squared-error R². ``label_transform`` (a ``ml4trading.models.learned.labels.LabelTransform``)
     is what the fit turned its labels into before training on them; the validation scoring
     applies it to the realized returns, so they are in the fit's units. A fit-free model leaves
-    all four None; a fit with no rows, the last three."""
+    all four None; a fit with no rows, the last three. A fit that stopped early on an evaluation
+    set (``ml4trading.models.learned.base.EarlyStop``) records ``best_iteration``, the round it
+    kept, and ``eval_mse``, the squared error on that set at that round; otherwise both are
+    None."""
 
     predictions: pd.DataFrame
     artifact: object | None
@@ -66,6 +69,8 @@ class FoldResult:
     baseline_prediction: float | None = None
     fit_label_mean: float | None = None
     label_transform: object | None = None
+    best_iteration: int | None = None
+    eval_mse: float | None = None
 
 
 class Model(ABC):

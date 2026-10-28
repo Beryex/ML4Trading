@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 from ml4trading.features import CALENDAR, FEATURE_ETFS, load_feature_set
-from ml4trading.models.learned.base import FitArtifact, LearnedModel
+from ml4trading.models.learned.base import EarlyStop, FitArtifact, LearnedModel
 from ml4trading.models.learned.labels import LABELS
 from ml4trading.models.learned.losses import LOSSES
 from ml4trading.models.registry import register_model
@@ -101,21 +101,32 @@ def cs_rank_features(X: pd.DataFrame, period: np.ndarray) -> pd.DataFrame:
 
 
 class LGBMArtifact(FitArtifact):
-    """A trained booster, saved as LightGBM's own text model."""
+    """A trained booster, saved as LightGBM's own text model. After early stopping ``predict``
+    reads only the first ``best_iteration`` rounds (``lgb.train`` already drops the later ones
+    on return; the artifact does not rely on that), and a saved model keeps only the best
+    rounds, so a loaded artifact has nothing left to cut (its ``best_iteration`` is None) and
+    predicts the same."""
 
     FILENAME = "model.txt"
 
     booster: lgb.Booster
 
-    def __init__(self, booster):
+    def __init__(self, booster, best_iteration: int | None = None, eval_mse: float | None = None):
         self.booster = booster
+        self.best_iteration = best_iteration
+        self.eval_mse = eval_mse
 
     def feature_names(self) -> list[str]:
         return list(self.booster.feature_name())
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         return np.asarray(
-            self.booster.predict(X[self.feature_names()], num_threads=NUM_THREADS), dtype=float
+            self.booster.predict(
+                X[self.feature_names()],
+                num_iteration=self.best_iteration,
+                num_threads=NUM_THREADS,
+            ),
+            dtype=float,
         )
 
     def native_importance(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -217,7 +228,12 @@ class NonlinearModel(LearnedModel):
             columns = [c for c in columns if c != CATEGORICAL]
         return columns
 
-    def _fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray) -> LGBMArtifact:
+    def _fit(
+        self,
+        X_fit: pd.DataFrame,
+        y_fit: np.ndarray,
+        eval_set: tuple[pd.DataFrame, np.ndarray, EarlyStop] | None = None,
+    ) -> LGBMArtifact:
         import lightgbm as lgb
 
         params = {
@@ -234,5 +250,18 @@ class NonlinearModel(LearnedModel):
             X_fit = X_fit[columns]
         categorical = [CATEGORICAL] if CATEGORICAL in columns else []
         data = lgb.Dataset(X_fit, label=y_fit, categorical_feature=categorical)
-        booster = lgb.train(params, data, num_boost_round=int(self.params["n_estimators"]))
-        return LGBMArtifact(booster)
+        if eval_set is None:
+            booster = lgb.train(params, data, num_boost_round=int(self.params["n_estimators"]))
+            return LGBMArtifact(booster)
+        X_eval, y_eval, stop = eval_set
+        # the evaluation error is the squared one whatever the training loss (under ``l1`` the
+        # objective's own default metric would be the absolute error)
+        params["metric"] = "l2"
+        booster = lgb.train(
+            params,
+            data,
+            num_boost_round=stop.max_rounds,
+            valid_sets=[lgb.Dataset(X_eval[columns], label=y_eval, reference=data)],
+            callbacks=[lgb.early_stopping(stop.patience, verbose=False)],
+        )
+        return LGBMArtifact(booster, booster.best_iteration, booster.best_score["valid_0"]["l2"])

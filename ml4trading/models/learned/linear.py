@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import ElasticNet
 
-from ml4trading.models.learned.base import FitArtifact, LearnedModel
+from ml4trading.models.learned.base import EarlyStop, FitArtifact, LearnedModel
 from ml4trading.models.registry import register_model
 
 CATEGORICAL = "stock_id"
@@ -97,7 +97,16 @@ class LinearModel(LearnedModel):
         if not float(params["alpha_ratio"]) > 0.0:
             raise ValueError(f"linear: alpha_ratio must be positive, got {params['alpha_ratio']}")
 
-    def _fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray) -> LinearArtifact:
+    def _fit(
+        self,
+        X_fit: pd.DataFrame,
+        y_fit: np.ndarray,
+        eval_set: tuple[pd.DataFrame, np.ndarray, EarlyStop] | None = None,
+    ) -> LinearArtifact:
+        if eval_set is not None:
+            raise ValueError(
+                "linear: early stopping needs a boosted model; an elastic net has none"
+            )
         values = impute_by_period(X_fit.drop(columns=CATEGORICAL).astype(np.float64))
         mean, std = scaling_of(values)
         Z = ((values - mean) / std).to_numpy()
