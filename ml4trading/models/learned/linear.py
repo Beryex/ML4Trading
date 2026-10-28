@@ -89,6 +89,31 @@ class LinearArtifact(FitArtifact):
             )
 
 
+def fit_elastic_net(
+    X: pd.DataFrame, y: np.ndarray, alpha_ratio: float, l1_ratio: float, max_iter: int
+) -> LinearArtifact:
+    """``linear``'s fit of ``y`` on every column of ``X`` (indexed by (period, symbol)): the
+    missing values imputed by period, the columns standardized over these rows, and an elastic
+    net at ``alpha_ratio * alpha_max``. A constant ``y`` is fitted by its mean alone.
+    ``nonlinear``'s linear initial score is this fit too."""
+    values = impute_by_period(X.astype(np.float64))
+    mean, std = scaling_of(values)
+    Z = ((values - mean) / std).to_numpy()
+    largest = alpha_max(Z, y, l1_ratio)
+    if not largest > 0.0:  # a constant label: nothing to explain
+        return LinearArtifact(np.zeros(Z.shape[1]), float(y.mean()), mean, std)
+    net = ElasticNet(
+        alpha=alpha_ratio * largest,
+        l1_ratio=l1_ratio,
+        max_iter=max_iter,
+        precompute=True,
+        selection="cyclic",
+        random_state=0,
+    )
+    net.fit(Z, y)
+    return LinearArtifact(net.coef_, float(net.intercept_), mean, std)
+
+
 @register_model("linear")
 class LinearModel(LearnedModel):
     PARAMS = (*LearnedModel.SHARED_PARAMS, "feature_set", "alpha_ratio", "l1_ratio", "max_iter")
@@ -124,20 +149,10 @@ class LinearModel(LearnedModel):
             raise ValueError(
                 "linear: early stopping needs a boosted model; an elastic net has none"
             )
-        values = impute_by_period(X_fit[self._fit_columns(X_fit.columns)].astype(np.float64))
-        mean, std = scaling_of(values)
-        Z = ((values - mean) / std).to_numpy()
-        l1_ratio = float(self.params["l1_ratio"])
-        largest = alpha_max(Z, y_fit, l1_ratio)
-        if not largest > 0.0:  # a constant label: nothing to explain
-            return LinearArtifact(np.zeros(Z.shape[1]), float(y_fit.mean()), mean, std)
-        net = ElasticNet(
-            alpha=float(self.params["alpha_ratio"]) * largest,
-            l1_ratio=l1_ratio,
-            max_iter=int(self.params["max_iter"]),
-            precompute=True,
-            selection="cyclic",
-            random_state=0,
+        return fit_elastic_net(
+            X_fit[self._fit_columns(X_fit.columns)],
+            y_fit,
+            float(self.params["alpha_ratio"]),
+            float(self.params["l1_ratio"]),
+            int(self.params["max_iter"]),
         )
-        net.fit(Z, y_fit)
-        return LinearArtifact(net.coef_, float(net.intercept_), mean, std)

@@ -21,7 +21,7 @@ from ml4trading.models.learned.horizon import horizon_labels, realized_by
 from ml4trading.models.learned.labels import LabelTransform
 from ml4trading.models.learned.linear import impute_by_period
 from ml4trading.models.learned.losses import baseline_prediction, loss_value, oos_r2
-from ml4trading.models.learned.nonlinear import NonlinearModel
+from ml4trading.models.learned.nonlinear import LGBMArtifact, NonlinearModel
 from ml4trading.pipeline import load_frames
 from ml4trading.testing import assert_causal
 from ml4trading.train import _scored_val, _val_r2, train
@@ -177,6 +177,8 @@ def test_two_fits_are_identical(frames, method):
         ("nonlinear", {"feature_transform": "cs_rank"}),
         ("linear", {"horizon": 5}),
         ("nonlinear", {"horizon": 5}),
+        ("nonlinear", {"init_model": "linear"}),
+        ("nonlinear", {"init_model": "linear", "label": "demean_winsor", "risk_adjust": "vol"}),
     ],
 )
 def test_causal(learned_data, method, params):
@@ -932,8 +934,13 @@ def test_default_added_parameters_change_nothing(frames, monkeypatch):
     # no constraint: the key itself is left out, not passed empty
     assert seen["params"] == {**before, **categorical, **piece_wise_linear, **noise_robust}
     assert "monotone_constraints" not in seen["params"]
+    # init_model 'none' (and the other init_* keys) reach LightGBM in no form: no init_score, so
+    # it boosts from its own start, and the artifact is the booster alone
+    assert not any(key.startswith("init") for key in seen["params"])
+    assert set(seen["dataset_kwargs"]) == {"label", "categorical_feature"}
     assert seen["dataset_kwargs"]["categorical_feature"] == ["stock_id"]
     assert seen["train_kwargs"] == {"num_boost_round": 100}
+    assert type(result.artifact) is LGBMArtifact
 
     # the same fit without those ten keys (LightGBM fills in the same values) predicts the same
     data = seen["data"]
@@ -1526,6 +1533,332 @@ def test_monotone_constraints_reach_the_run_files(learned_data, tmp_path, monkey
     # the saved booster of the constrained candidate carries the constraints
     text = (run / "folds" / "F2021-07" / "model" / "model.txt").read_text()
     assert ("monotone_constraints=" in text) == (fold["chosen"] == 1)
+    assert backtest(run, learned_data)["n_periods"] > 0
+
+
+# ---- boosting from a linear initial score (init_model: Friedman 2001's initial estimate F0,
+# handed to LightGBM as the Dataset's init_score) ----
+
+
+def _hybrid(f, early_stop=None, **params):
+    """A nonlinear fold on ``FIT`` -> ``JUNE``, boosted from the linear initial score."""
+    model = _model("nonlinear", init_model="linear", **params)
+    return model.fit_predict_fold(f, FIT, JUNE, early_stop=early_stop)
+
+
+def _datasets_capturing(monkeypatch):
+    """The keyword arguments of every ``lgb.Dataset`` a fit builds, in order."""
+    import lightgbm as lgb
+
+    real_dataset, made = lgb.Dataset, []
+
+    def spy_dataset(data, *args, **kwargs):
+        made.append(kwargs)
+        return real_dataset(data, *args, **kwargs)
+
+    monkeypatch.setattr(lgb, "Dataset", spy_dataset)
+    return made
+
+
+def _linear_signal(frames):
+    """The frames with a label linear in ``Volatility_5d``, plus noise: the linear part explains
+    most of it, so the trees boosted from it have little of their own to add."""
+    f = frames["nonlinear"]
+    noise = np.random.default_rng(0).normal(0.0, 0.002, len(f.panel))
+    return Frames(f.panel.assign(y=0.5 * f.X["Volatility_5d"].to_numpy() + noise), f.X)
+
+
+def test_hybrid_predicts_linear_plus_booster(frames, monkeypatch, tmp_path):
+    from ml4trading.models.learned.nonlinear import HybridArtifact
+
+    f = frames["nonlinear"]
+    _feature_sets(monkeypatch, tmp_path, small="stock_id\nReturn_1d\nVolatility_5d\nWeekday\n")
+    result = _hybrid(f, init_alpha_ratio=0.05, init_l1_ratio=0.3, init_feature_set="small")
+    artifact = result.artifact
+    assert isinstance(artifact, HybridArtifact)
+    # the linear part is linear's own fit, with the same penalty and columns, on the same rows and
+    # labels: an elastic net fitted separately here by the linear method
+    net = _model("linear", alpha_ratio=0.05, l1_ratio=0.3, feature_set="small")
+    linear = net.fit_predict_fold(f, FIT, JUNE).artifact
+    assert artifact.init.feature_names() == linear.feature_names()
+    assert linear.feature_names() == ["Return_1d", "Volatility_5d", "Weekday"]
+    assert np.array_equal(artifact.init.coef, linear.coef) and (linear.coef != 0).any()
+    assert artifact.init.intercept == linear.intercept
+    # the prediction is that net's plus the trees' (LightGBM's own predict, which leaves the
+    # init_score out), and the fold trades that sum
+    X = _keyed(f, JUNE)
+    trees = artifact.booster.predict(X[artifact.booster.feature_name()], num_threads=8)
+    assert np.abs(artifact.predict(X) - (linear.predict(X) + trees)).max() <= 1e-12
+    assert np.array_equal(result.predictions["prediction"].to_numpy(), artifact.predict(X))
+    assert np.abs(trees).max() > 1e-6  # the trees do add something
+
+
+def test_the_linear_part_fits_the_labels_the_booster_fits(frames, monkeypatch):
+    from ml4trading.models.learned.linear import fit_elastic_net
+
+    made = _datasets_capturing(monkeypatch)
+    # fit units far from the raw return: demeaned, winsorized and per unit of volatility
+    params = {"init_model": "linear", "label": "demean_winsor", "risk_adjust": "vol"}
+    result, X_fit, y_fit = _fit_capturing(monkeypatch, frames["nonlinear"], **params)
+    columns = [c for c in X_fit.columns if c != "stock_id"]
+    max_iter = config.METHOD_DEFAULTS["linear"]["model"]["max_iter"]  # linear's own cap
+    want = fit_elastic_net(X_fit[columns], y_fit, 0.01, 0.5, max_iter)
+    init = result.artifact.init
+    assert np.array_equal(init.coef, want.coef) and init.intercept == want.intercept
+    # LightGBM starts from that net's in-sample prediction, on the same rows and labels
+    (fitted,) = made
+    assert np.array_equal(fitted["label"], y_fit)
+    assert np.array_equal(fitted["init_score"], want.predict(X_fit))
+
+
+@pytest.mark.parametrize("loss", ["l1", "mse"])
+def test_hybrid_with_zero_rounds_equals_linear(frames, loss):
+    # LightGBM needs a round and a learning rate above 0: one round at 1e-12 adds next to nothing,
+    # and from an initial score LightGBM adds no starting constant of its own
+    f = frames["nonlinear"]
+    hybrid = _hybrid(f, loss=loss, n_estimators=1, learning_rate=1e-12).predictions
+    linear = _model("linear").fit_predict_fold(f, FIT, JUNE).predictions
+    assert len(hybrid) == len(linear) > 0
+    pd.testing.assert_frame_equal(hybrid[["period", "symbol"]], linear[["period", "symbol"]])
+    assert np.abs(hybrid["prediction"] - linear["prediction"]).max() <= 1e-9
+    # the same round without the initial score starts from LightGBM's constant instead
+    plain = _model("nonlinear", loss=loss, n_estimators=1, learning_rate=1e-12)
+    constant = plain.fit_predict_fold(f, FIT, JUNE).predictions["prediction"]
+    assert np.abs(constant - linear["prediction"]).max() > 1e-6
+
+
+@pytest.mark.parametrize("early_stopping", [False, True])
+def test_hybrid_save_load_round_trip(frames, tmp_path, early_stopping):
+    from ml4trading.models.learned.linear import LinearArtifact
+    from ml4trading.models.learned.nonlinear import HybridArtifact
+
+    f = frames["nonlinear"]
+    stop = EarlyStop(_periods_of(f, JUNE), POOL, 50, 5) if early_stopping else None
+    artifact = _hybrid(f, early_stop=stop).artifact
+    assert (artifact.best_iteration is not None) == early_stopping
+    saved = tmp_path / "model"
+    artifact.save(saved)
+    files = sorted(str(p.relative_to(saved)) for p in saved.rglob("*") if p.is_file())
+    assert files == ["init/model.npz", "model.txt"]
+    loaded = type(artifact).load(saved)
+    assert isinstance(loaded, HybridArtifact) and loaded.best_iteration is None
+    X = _keyed(f, JUNE)
+    assert loaded.feature_names() == artifact.feature_names()
+    assert np.array_equal(loaded.predict(X), artifact.predict(X))
+    # each part in its own format: the booster's text (the trees alone) and linear's file
+    trees, net = LGBMArtifact.load(saved), LinearArtifact.load(saved / "init")
+    assert np.array_equal(net.coef, artifact.init.coef) and net.intercept == artifact.init.intercept
+    assert np.array_equal(loaded.predict(X), net.predict(X) + trees.predict(X))
+
+
+def test_hybrid_early_stopping_uses_the_linear_init_on_eval_rows(frames, monkeypatch):
+    made = _datasets_capturing(monkeypatch)
+    f = _linear_signal(frames)
+    stop = EarlyStop(_periods_of(f, JUNE), ("AAA", "BBB"), 50, 5)
+    result, (X_eval, y_eval, _) = _early_stopping_capturing(
+        monkeypatch, f, stop, init_model="linear", loss="mse"
+    )
+    artifact = result.artifact
+    assert 1 <= result.best_iteration <= 50
+    # the evaluation Dataset starts from the linear part's prediction on its own rows, as the
+    # training one does on the fit rows
+    _, evaluated = made
+    assert evaluated["reference"] is not None
+    assert np.array_equal(evaluated["label"], y_eval)
+    assert np.array_equal(evaluated["init_score"], artifact.init.predict(X_eval))
+    # so the error it stopped on is the hybrid's, the linear part plus the kept rounds (LightGBM
+    # holds the labels in float32, hence the tolerance) ...
+    hybrid = np.mean((y_eval - artifact.predict(X_eval)) ** 2)
+    assert result.eval_mse == pytest.approx(hybrid, rel=1e-6)
+    # ... not the trees' alone, which leave the linear signal out
+    trees = artifact.booster.predict(
+        X_eval[artifact.booster.feature_name()], num_iteration=result.best_iteration, num_threads=8
+    )
+    assert np.mean((y_eval - trees) ** 2) > 2 * result.eval_mse
+    # and it is the error of the fold's own predictions on those rows
+    panel = f.panel
+    rows = panel[panel["period"].isin(set(stop.periods)) & panel["symbol"].isin(stop.symbols)]
+    both = rows.merge(result.predictions, on=["period", "symbol"])
+    assert len(both) == len(y_eval) > 0
+    assert result.eval_mse == pytest.approx(
+        np.mean((both["y"] - both["prediction"]) ** 2), rel=1e-6
+    )
+
+
+def test_init_model_none_ignores_the_init_parameters(frames, monkeypatch, tmp_path):
+    _feature_sets(monkeypatch, tmp_path, small="Return_1d\nWeekday\n")
+    f = frames["nonlinear"]
+    default = _model("nonlinear").fit_predict_fold(f, FIT, JUNE)
+    other = _model(
+        "nonlinear",
+        init_model="none",
+        init_alpha_ratio=0.3,
+        init_l1_ratio=0.9,
+        init_feature_set="small",
+    ).fit_predict_fold(f, FIT, JUNE)
+    assert type(other.artifact) is LGBMArtifact
+    assert other.artifact.booster.model_to_string() == default.artifact.booster.model_to_string()
+    pd.testing.assert_frame_equal(default.predictions, other.predictions, check_exact=True)
+
+
+def test_the_two_parts_read_their_own_columns(frames, monkeypatch, tmp_path):
+    f = frames["nonlinear"]
+    _feature_sets(
+        monkeypatch,
+        tmp_path,
+        trees="stock_id\nReturn_1d\nWeekday\n",
+        net="Volatility_5d\nstock_id\nReturn_1d\n",
+        unknown="Return_1d\nNo_Such_Feature\n",
+    )
+    params = {"feature_set": "trees", "init_feature_set": "net"}
+    result = _hybrid(f, **params)
+    artifact = result.artifact
+    assert artifact.booster.feature_name() == ["stock_id", "Return_1d", "Weekday"]
+    assert artifact.init.feature_names() == ["Volatility_5d", "Return_1d"]  # less the code
+    # the artifact's columns: the booster's, then those only the linear part reads
+    assert artifact.feature_names() == ["stock_id", "Return_1d", "Weekday", "Volatility_5d"]
+    X = _keyed(f, JUNE)
+    assert np.array_equal(artifact.predict(X), artifact.predict(X[artifact.feature_names()]))
+    # a column neither part reads has no say, in the fit or in the prediction
+    other = f.X.copy()
+    other["Returns_1h_std"] = other["Returns_1h_std"].to_numpy()[::-1]
+    got = _hybrid(Frames(f.panel, other), **params)
+    pd.testing.assert_frame_equal(got.predictions, result.predictions, check_exact=True)
+    # a column the features lack is refused, by name
+    with pytest.raises(ValueError, match="init_feature_set.*No_Such_Feature"):
+        _hybrid(f, init_feature_set="unknown")
+
+
+def test_hybrid_native_importance_covers_the_trees_only(frames, monkeypatch, tmp_path):
+    from ml4trading.importance import importance_table
+
+    f = frames["nonlinear"]
+    _feature_sets(monkeypatch, tmp_path, trees="stock_id\nReturn_1d\nWeekday\n")
+    artifact = _hybrid(f, feature_set="trees").artifact
+    X = _keyed(f, JUNE)
+    native = artifact.native_importance(X)
+    assert list(native.index) == artifact.feature_names()
+    # the booster's gain, split count and TreeSHAP, as the booster alone reports them; nothing for
+    # a column only the linear part reads
+    trees = LGBMArtifact(artifact.booster).native_importance(X)
+    pd.testing.assert_frame_equal(native.loc[trees.index], trees, check_dtype=False)
+    only_linear = native.index.difference(trees.index)
+    assert len(only_linear) > 0 and native.loc[only_linear].isna().all().all()
+    # the permutation measures cover every column the hybrid reads
+    y = rows_in(f.panel, JUNE)["y"].to_numpy(float)
+    table = importance_table(artifact, X, y, y)
+    assert list(table.index) == artifact.feature_names()
+    assert np.isfinite(table["perm_mse"]).all()
+
+
+def test_risk_scaling_applies_to_the_sum(frames):
+    f = frames["nonlinear"]
+    result = _hybrid(f, risk_adjust="vol")
+    X = _keyed(f, JUNE)
+    output = pd.Series(result.artifact.predict(X), index=X.index)
+    keys = pd.MultiIndex.from_frame(result.predictions[["period", "symbol"]])
+    # the model's own output, before the scaling to returns, is the linear part plus the trees
+    assert len(keys) > 0
+    assert np.array_equal(result.fit_predictions.to_numpy(), output.loc[keys].to_numpy())
+
+
+@pytest.mark.parametrize("early_stopping", [False, True])
+def test_linear_trees_can_boost_from_the_linear_score(frames, tmp_path, early_stopping):
+    f = frames["nonlinear"]
+    stop = EarlyStop(_periods_of(f, JUNE), POOL, 50, 5) if early_stopping else None
+    result = _hybrid(f, early_stop=stop, **LINEAR_TREES)
+    artifact = result.artifact
+    assert "[linear_tree: 1]" in artifact.booster.model_to_string()
+    assert len(result.predictions) > 0 and np.isfinite(result.predictions["prediction"]).all()
+    artifact.save(tmp_path / "model")
+    X = _keyed(f, JUNE)
+    assert np.array_equal(type(artifact).load(tmp_path / "model").predict(X), artifact.predict(X))
+
+
+def test_monotone_with_init_model_is_refused(learned_data, tmp_path, monkeypatch):
+    def no_loading(*args, **kwargs):
+        raise AssertionError("the data was loaded before the model was checked")
+
+    monkeypatch.setattr("ml4trading.train.load_frames", no_loading)
+    # a constraint binds the trees, not the linear initial score they are added to
+    constrained = {"loss": "mse", "monotone_constraints": {"Return_1d": 1}}
+    with pytest.raises(ValueError, match="monotone_constraints.*init_model"):
+        _model("nonlinear", init_model="linear", **constrained)
+    with pytest.raises(ValueError, match="monotone_constraints.*init_model"):
+        train(
+            "nonlinear",
+            tmp_path / "run",
+            learned_data,
+            grid={"model.init_model": ["none", "linear"]},  # one candidate is enough
+            overrides={f"model.{k}": v for k, v in constrained.items()},
+        )
+    # either alone is fine, and so is a mapping that sets no sign
+    _model("nonlinear", **constrained)
+    _model("nonlinear", init_model="linear", loss="mse")
+    _model("nonlinear", init_model="linear", monotone_constraints={"Return_1d": 0})
+
+
+def test_bad_init_parameters_are_refused_before_loading(learned_data, tmp_path, monkeypatch):
+    def no_loading(*args, **kwargs):
+        raise AssertionError("the data was loaded before the model was checked")
+
+    monkeypatch.setattr("ml4trading.train.load_frames", no_loading)
+    _feature_sets(monkeypatch, tmp_path, only_code="stock_id\n")
+    for bad, message in (
+        ({"init_model": "ridge"}, "init_model.*'ridge'"),
+        ({"init_model": None}, "init_model.*None"),
+        ({"init_alpha_ratio": 0.0}, "init_alpha_ratio"),
+        ({"init_alpha_ratio": -0.1}, "init_alpha_ratio"),
+        ({"init_l1_ratio": 0.0}, "init_l1_ratio"),
+        ({"init_l1_ratio": 1.5}, "init_l1_ratio"),
+        ({"init_feature_set": "nope"}, "nope.*known"),
+        ({"init_feature_set": "only_code"}, "init_feature_set.*only_code.*stock_id"),
+    ):
+        with pytest.raises(ValueError, match=message):  # each refused before any data loads
+            _model("nonlinear", **{"init_model": "linear", **bad})
+    with pytest.raises(ValueError, match="init_model.*'ridge'"):
+        train("nonlinear", tmp_path / "run", learned_data, overrides={"model.init_model": "ridge"})
+    with pytest.raises(ValueError, match="init_alpha_ratio"):
+        train(
+            "nonlinear",
+            tmp_path / "run",
+            learned_data,
+            grid={"model.init_alpha_ratio": [0.01, 0.0]},
+        )
+    # the parameters are nonlinear's: linear has no initial score
+    for name in ("init_model", "init_alpha_ratio", "init_l1_ratio", "init_feature_set"):
+        with pytest.raises(ValueError, match=f"unknown parameter.*{name}"):
+            _model("linear", **{name: "none"})
+    _model("nonlinear", init_model="linear", init_alpha_ratio=1.0, init_l1_ratio=1.0)
+
+
+def test_a_hybrid_run_saves_both_parts(learned_data, tmp_path, monkeypatch):
+    from ml4trading.diagnose import diagnose
+
+    # the trees read three columns, the linear part every one but the code
+    _feature_sets(monkeypatch, tmp_path, trees="stock_id\nReturn_1d\nWeekday\n")
+    run = train(
+        "nonlinear",
+        tmp_path / "run",
+        learned_data,
+        overrides={**SHORT_FOLDS, "model.init_model": "linear", "model.feature_set": "trees"},
+        importance=True,
+    )
+    meta = json.loads((run / "run.json").read_text())
+    assert meta["config"]["model"]["init_model"] == "linear"
+    folds = sorted((run / "folds").iterdir())
+    assert len(folds) > 0
+    for fdir in folds:
+        model = fdir / "model"
+        files = sorted(str(p.relative_to(model)) for p in model.rglob("*") if p.is_file())
+        assert files == ["init/model.npz", "model.txt"]
+        table = pd.read_parquet(fdir / "val" / "importance.parquet").set_index("feature")
+        assert table.index.is_unique and np.isfinite(table["perm_mse"]).all()
+        assert table["gain"].notna().sum() == 3 and len(table) > 3  # the trees' columns only
+    # the run's diagnosis skips the measures the trees do not have
+    importance = pd.read_csv(diagnose(run) / "importance.csv").set_index("feature")
+    assert importance.loc[["Return_1d", "Weekday"], "gain_mean"].notna().all()
+    assert importance.drop(index=["stock_id", "Return_1d", "Weekday"])["gain_mean"].isna().all()
     assert backtest(run, learned_data)["n_periods"] > 0
 
 

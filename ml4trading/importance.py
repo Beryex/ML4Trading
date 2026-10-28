@@ -4,7 +4,9 @@ Two kinds of measure, which answer different questions:
 
 * A fit's own account of itself (``LGBMArtifact.native_importance``: the booster's gain, split
   count and TreeSHAP contribution) says what the trees use; it is read off the fit and says
-  nothing about whether using it paid out of sample.
+  nothing about whether using it paid out of sample. A booster fitted from a linear initial score
+  (``HybridArtifact``) reports its trees' alone, and nothing for a column only its linear part
+  reads.
 * ``permutation_importance`` shuffles one feature column at a time over the validation rows
   (Breiman 2001) and measures how much worse the fit's predictions get, so it works for any
   fit, and on rows the fit was not trained on (under HPO they also chose its stopping round and
@@ -15,8 +17,9 @@ Two kinds of measure, which answer different questions:
   smoothing, the IC that ``perm_ic`` starts from therefore differs from
   ``val_diagnostics.ic_mean``, which is the traded prediction's.
 
-``linear`` fills a missing value with its period's median, recomputed at prediction time over
-the rows it is handed: here the scored rows only, not the fit's own.
+``linear``, and ``nonlinear``'s linear initial score, fill a missing value with its period's
+median, recomputed at prediction time over the rows they are handed: here the scored rows only,
+not the fit's own.
 
 A feature that is correlated with another can look unimportant, the twin carrying its signal once
 it is shuffled; read the numbers as the cost of losing a column's own values, not as a ranking of

@@ -226,6 +226,23 @@ universe decides what is traded.
     on one), a constraint with `linear_tree` (LightGBM enforces it when it chooses a split, not in
     a leaf's linear model) and a constraint with the default `loss=l1` (LightGBM refuses
     `regression_l1` with one), so `--set model.loss=mse` goes along with it.
+  - `init_model` (`none`), `init_alpha_ratio` (0.01), `init_l1_ratio` (0.5) and
+    `init_feature_set` (`all`): with `init_model=linear` the booster starts from an initial
+    estimate (Friedman 2001, "Greedy Function Approximation: A Gradient Boosting Machine")
+    instead of LightGBM's own constant. That estimate is `linear`'s elastic net, fitted first on
+    the same fit rows and the same labels as the trees (after `horizon`, `risk_adjust` and
+    `label`), with the penalty ratio, `l1_ratio` and feature set the three `init_*` options give
+    (`linear`'s defaults; the stock code is never used). Its prediction is LightGBM's
+    `init_score` ([lightgbm.Dataset](https://lightgbm.readthedocs.io/en/stable/pythonapi/lightgbm.Dataset.html))
+    on the fit rows and on the early-stopping rows, so the trees fit what the net leaves and
+    stop on the whole model's error. Under the default `loss=l1` the net is still a squared-error
+    fit, and the trees correct it on the absolute error. The model predicts the net's prediction
+    plus the trees' (LightGBM's own prediction is the trees' alone); the volatility scaling, the
+    smoothing and the R² read that sum. A fold's `model/` holds the booster's `model.txt` and
+    the net's `init/model.npz`. Under `--importance` the `gain`, `split` and `shap` columns
+    describe the trees only, and are empty for a column only the net reads; the permutation
+    measures cover both parts. `linear_tree` may go with it; a `monotone_constraints` sign may
+    not (it would bind the trees, not the net), and is refused at construction.
   - `loss` (`l1` default, ML4Investment's `TRAIN_OBJECTIVE`; or `mse`), `n_estimators` (100) and
     LightGBM's `num_leaves`, `min_data_in_leaf`, `learning_rate`, `feature_fraction`,
     `bagging_fraction`, `bagging_freq`, `lambda_l1`, `lambda_l2`, `max_depth`,

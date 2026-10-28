@@ -25,6 +25,16 @@ the process on one) and one beside ``linear_tree`` (LightGBM enforces a constrai
 split, not in a leaf's linear model). LightGBM refuses a constraint on ``regression_l1`` too, so
 a set one needs ``loss='mse'``, which is refused at construction as well.
 
+With ``init_model='linear'`` the booster starts from an initial estimate F0 (Friedman 2001,
+"Greedy Function Approximation: A Gradient Boosting Machine") in place of LightGBM's own constant
+start: ``linear``'s elastic net, fitted first on the same fit rows and the same labels, in the
+units the booster trains on (``init_alpha_ratio``, ``init_l1_ratio`` and ``init_feature_set`` are
+its ``alpha_ratio``, ``l1_ratio`` and ``feature_set``). Its prediction is LightGBM's
+``init_score`` (Dataset) on the fit rows and on the early-stopping rows, so the trees fit what the
+net leaves and stop on the whole model's error. LightGBM's own prediction is the trees' alone, so
+the fitted model (``HybridArtifact``) adds the net's back. A monotone constraint would bind the
+trees, not the net, and is refused with it.
+
 A fit reproduces exactly only with ``deterministic`` and ``force_row_wise`` (ML4Investment's
 fixed training configuration) and the same thread count, which is therefore fixed here, not read
 from the machine. LightGBM is imported only when a booster is trained or loaded: it needs an
@@ -40,9 +50,11 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from ml4trading.features import CALENDAR, FEATURE_ETFS
+from ml4trading.config import METHOD_DEFAULTS
+from ml4trading.features import CALENDAR, FEATURE_ETFS, load_feature_set
 from ml4trading.models.learned.base import EarlyStop, FitArtifact, LearnedModel
 from ml4trading.models.learned.labels import LABELS
+from ml4trading.models.learned.linear import LinearArtifact, fit_elastic_net
 from ml4trading.models.learned.losses import LOSSES
 from ml4trading.models.registry import register_model
 
@@ -60,6 +72,12 @@ MONOTONE_SIGNS = (-1, 0, 1)
 #: LightGBM's ``monotone_constraints_method`` values (Parameters, "Learning Control Parameters");
 #: it takes any other string without complaint, so they are listed here.
 MONOTONE_METHODS = ("basic", "intermediate", "advanced")
+#: ``init_model``: ``none`` boosts from LightGBM's own constant start; ``linear`` from the
+#: prediction of ``linear``'s elastic net, fitted on the same rows (Friedman 2001's F0).
+INIT_MODELS = ("none", "linear")
+#: The linear initial score's iteration cap: ``linear``'s own, a convergence cap rather than a
+#: model choice (see its comment in ``config.METHOD_DEFAULTS``).
+INIT_MAX_ITER = int(METHOD_DEFAULTS["linear"]["model"]["max_iter"])
 
 #: LightGBM's own parameter names, passed to it as they are.
 BOOSTING_PARAMS = (
@@ -190,6 +208,54 @@ class LGBMArtifact(FitArtifact):
         return cls(lgb.Booster(model_file=str(Path(directory) / cls.FILENAME)))
 
 
+class HybridArtifact(FitArtifact):
+    """A booster boosted from a linear initial score (``init_model='linear'``): ``init``, the
+    elastic net, and ``trees``, the booster trained from its prediction. LightGBM's own
+    prediction is the trees' alone (an ``init_score`` belongs to the Dataset, not to the model),
+    so ``predict`` adds the net's back. ``save`` writes the booster's ``model.txt`` (only its best
+    rounds, as ``LGBMArtifact`` does) and the net's ``model.npz`` into the ``init``
+    subdirectory, each part in its own format; a loaded artifact predicts the same.
+    ``native_importance`` is the booster's alone."""
+
+    FILENAME = LGBMArtifact.FILENAME
+    #: The subdirectory the linear part is saved in.
+    INIT_DIRECTORY = "init"
+
+    def __init__(self, trees: LGBMArtifact, init: LinearArtifact):
+        self.trees, self.init = trees, init
+        self.best_iteration, self.eval_mse = trees.best_iteration, trees.eval_mse
+
+    @property
+    def booster(self) -> lgb.Booster:
+        return self.trees.booster
+
+    def feature_names(self) -> list[str]:
+        """The booster's columns, then those only the linear part reads."""
+        names = self.trees.feature_names()
+        return names + [c for c in self.init.feature_names() if c not in names]
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        return self.init.predict(X) + self.trees.predict(X)
+
+    def native_importance(self, X: pd.DataFrame) -> pd.DataFrame:
+        """The booster's own measures (``LGBMArtifact.native_importance``) over every column the
+        model reads. They describe the trees only: the TreeSHAP values are the trees'
+        contributions, without the net's, and a column only the net reads has none (NaN)."""
+        return self.trees.native_importance(X).reindex(
+            pd.Index(self.feature_names(), name="feature")
+        )
+
+    def save(self, directory: Path) -> None:
+        self.trees.save(directory)
+        self.init.save(Path(directory) / self.INIT_DIRECTORY)
+
+    @classmethod
+    def load(cls, directory: Path) -> HybridArtifact:
+        return cls(
+            LGBMArtifact.load(directory), LinearArtifact.load(Path(directory) / cls.INIT_DIRECTORY)
+        )
+
+
 @register_model("nonlinear")
 class NonlinearModel(LearnedModel):
     PARAMS = (
@@ -202,10 +268,17 @@ class NonlinearModel(LearnedModel):
         "n_estimators",
         *BOOSTING_PARAMS,
         "monotone_constraints",  # not passed as it is: see ``_monotone_signs``
+        # the linear initial score (``_fit_init``); none reaches LightGBM as a parameter
+        "init_model",
+        "init_alpha_ratio",
+        "init_l1_ratio",
+        "init_feature_set",
     )
     #: The features are built once per run, with ``extra_features`` joined and
     #: ``feature_transform`` applied.
     FRAME_PARAMS = (*LearnedModel.FRAME_PARAMS, "feature_transform")
+    #: The columns of ``init_feature_set``, read at construction; None is every column.
+    _init_feature_set: list[str] | None = None
 
     def __init__(self, hold_overnight: bool, **params):
         super().__init__(hold_overnight, **params)
@@ -231,6 +304,7 @@ class NonlinearModel(LearnedModel):
                 "nonlinear: linear_tree cannot be fitted on loss='l1' (LightGBM refuses "
                 "regression_l1 with linear trees); use loss='mse'"
             )
+        self._check_init(params)
         self._check_monotone_constraints(params)
         # read here, once: a misspelt set, or one that cannot serve a categorical stock_id, is
         # refused before any data is loaded, and every fold of the run reads the same columns
@@ -243,6 +317,30 @@ class NonlinearModel(LearnedModel):
             raise ValueError(
                 f"nonlinear: feature set {params['feature_set']!r} lacks {CATEGORICAL!r}, which "
                 f"stock_id='categorical' needs; add it to the set or use stock_id='drop'"
+            )
+
+    def _check_init(self, params: dict) -> None:
+        """Refuse a bad initial-score parameter at construction, before any data is loaded, and
+        read ``init_feature_set`` once, as ``feature_set`` is read: a misspelt set is refused and
+        every fold of a run reads the same columns. All four are checked whatever ``init_model``
+        is, as ``linear`` checks its own."""
+        if params["init_model"] not in INIT_MODELS:
+            raise ValueError(
+                f"nonlinear: unknown init_model {params['init_model']!r}; known: {INIT_MODELS}"
+            )
+        if not 0.0 < float(params["init_l1_ratio"]) <= 1.0:
+            raise ValueError(
+                f"nonlinear: init_l1_ratio must lie in (0, 1], got {params['init_l1_ratio']}"
+            )
+        if not float(params["init_alpha_ratio"]) > 0.0:
+            raise ValueError(
+                f"nonlinear: init_alpha_ratio must be positive, got {params['init_alpha_ratio']}"
+            )
+        self._init_feature_set = load_feature_set(params["init_feature_set"])
+        if self._init_feature_set is not None and set(self._init_feature_set) <= {CATEGORICAL}:
+            raise ValueError(
+                f"nonlinear: init_feature_set {params['init_feature_set']!r} has no column but "
+                f"{CATEGORICAL!r}, which the linear initial score does not use"
             )
 
     def _check_monotone_constraints(self, params: dict) -> None:
@@ -289,6 +387,12 @@ class NonlinearModel(LearnedModel):
                 f"(LightGBM enforces a constraint when it chooses a split, not in a leaf's linear "
                 f"model, so the output would not be monotone)"
             )
+        if constrained and params["init_model"] != "none":
+            raise ValueError(
+                f"nonlinear: monotone_constraints {constrained} cannot be used with "
+                f"init_model={params['init_model']!r} (a constraint binds the trees, not the "
+                f"linear initial score they are added to, so the output would not be monotone)"
+            )
 
     @property
     def loss(self) -> str:
@@ -327,12 +431,40 @@ class NonlinearModel(LearnedModel):
         signs = [int(constraints.get(column, 0)) for column in columns]
         return signs if any(signs) else None
 
+    def _init_columns(self, available: pd.Index) -> list[str]:
+        """The columns the linear initial score is fitted on, in order: ``init_feature_set``'s
+        (every column for ``all``), less ``stock_id``, as ``linear`` reads its ``feature_set``.
+        A set column the features lack is an error, named."""
+        columns = list(available) if self._init_feature_set is None else self._init_feature_set
+        absent = [c for c in columns if c not in available]
+        if absent:
+            raise ValueError(
+                f"nonlinear: init_feature_set {self.params['init_feature_set']!r} names "
+                f"column(s) the features do not have: {absent}"
+            )
+        return [c for c in columns if c != CATEGORICAL]
+
+    def _fit_init(self, X_fit: pd.DataFrame, y_fit: np.ndarray) -> LinearArtifact | None:
+        """The linear initial score under ``init_model='linear'``, None under ``none``:
+        ``linear``'s elastic net on ``init_feature_set``'s columns of the fit rows, fitted on the
+        labels the booster is given (``y_fit``, in the fit's units), with ``linear``'s own
+        iteration cap."""
+        if self.params["init_model"] == "none":
+            return None
+        return fit_elastic_net(
+            X_fit[self._init_columns(X_fit.columns)],
+            y_fit,
+            float(self.params["init_alpha_ratio"]),
+            float(self.params["init_l1_ratio"]),
+            INIT_MAX_ITER,
+        )
+
     def _fit(
         self,
         X_fit: pd.DataFrame,
         y_fit: np.ndarray,
         eval_set: tuple[pd.DataFrame, np.ndarray, EarlyStop] | None = None,
-    ) -> LGBMArtifact:
+    ) -> LGBMArtifact | HybridArtifact:
         import lightgbm as lgb
 
         params = {
@@ -345,25 +477,36 @@ class NonlinearModel(LearnedModel):
             "verbosity": -1,
         }
         columns = self._fit_columns(X_fit.columns)
+        # the linear initial score is fitted first, on its own columns of the fit rows; LightGBM
+        # boosts from its prediction on them (init_score) in place of its own constant start.
+        # Without one, the Dataset gets no init_score at all
+        init = self._fit_init(X_fit, y_fit)
+        start = {} if init is None else {"init_score": init.predict(X_fit)}
         if columns != list(X_fit.columns):  # the default fit hands LightGBM the frame itself
             X_fit = X_fit[columns]
         signs = self._monotone_signs(columns)
         if signs is not None:
             params["monotone_constraints"] = signs
         categorical = [CATEGORICAL] if CATEGORICAL in columns else []
-        data = lgb.Dataset(X_fit, label=y_fit, categorical_feature=categorical)
+        data = lgb.Dataset(X_fit, label=y_fit, categorical_feature=categorical, **start)
         if eval_set is None:
             booster = lgb.train(params, data, num_boost_round=int(self.params["n_estimators"]))
-            return LGBMArtifact(booster)
+            trees = LGBMArtifact(booster)
+            return trees if init is None else HybridArtifact(trees, init)
         X_eval, y_eval, stop = eval_set
         # the evaluation error is the squared one whatever the training loss (under ``l1`` the
         # objective's own default metric would be the absolute error)
         params["metric"] = "l2"
+        # the evaluation rows start from the linear part's prediction on them as well, so the
+        # error the fit stops on is the whole model's. The net imputes a missing value with the
+        # median of the period's rows it is handed, as ``linear`` does: here the evaluation rows
+        eval_start = {} if init is None else {"init_score": init.predict(X_eval)}
         booster = lgb.train(
             params,
             data,
             num_boost_round=stop.max_rounds,
-            valid_sets=[lgb.Dataset(X_eval[columns], label=y_eval, reference=data)],
+            valid_sets=[lgb.Dataset(X_eval[columns], label=y_eval, reference=data, **eval_start)],
             callbacks=[lgb.early_stopping(stop.patience, verbose=False)],
         )
-        return LGBMArtifact(booster, booster.best_iteration, booster.best_score["valid_0"]["l2"])
+        trees = LGBMArtifact(booster, booster.best_iteration, booster.best_score["valid_0"]["l2"])
+        return trees if init is None else HybridArtifact(trees, init)

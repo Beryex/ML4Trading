@@ -244,6 +244,18 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             # mapping
             "monotone_constraints": {},
             "monotone_constraints_method": "basic",
+            # boosting from an initial estimate F0 (Friedman 2001, "Greedy Function
+            # Approximation: A Gradient Boosting Machine", Annals of Statistics): "none" (today's
+            # model) starts from LightGBM's own constant; "linear" first fits linear's elastic net
+            # on the same fit rows and labels and hands its prediction to LightGBM as the
+            # Dataset's init_score (LightGBM's Python API, lightgbm.Dataset), so the trees fit
+            # what it leaves. The net's penalty and columns are linear's defaults above:
+            # alpha_ratio 0.01, l1_ratio 0.5 (scikit-learn ElasticNet's default) and every column
+            # (stock_id is never used by the net)
+            "init_model": "none",
+            "init_alpha_ratio": 0.01,
+            "init_l1_ratio": 0.5,
+            "init_feature_set": "all",
         },
     },
 }
