@@ -200,10 +200,11 @@ universe decides what is traded.
     ([Parameters](https://lightgbm.readthedocs.io/en/stable/Parameters.html), "Learning Control
     Parameters"). They have no effect under `stock_id=drop`.
   - `linear_tree` (false) and `linear_lambda` (0.0): with `linear_tree=true` each tree's leaf
-    holds a linear model on the features its path splits on, ridge-penalised by `linear_lambda`
-    (Shi, Li & Li 2019, "Gradient Boosting With Piece-Wise Linear Regression Trees", IJCAI;
-    LightGBM's `linear_tree`, at its defaults). LightGBM fits it on `mse` only, so `loss=l1` with
-    it is refused. A row missing a feature its leaf uses gets the leaf's constant output.
+    holds a linear model on the numerical features its path splits on, ridge-penalised by
+    `linear_lambda` (Shi, Li & Li 2019, "Gradient Boosting With Piece-Wise Linear Regression
+    Trees", IJCAI; LightGBM's `linear_tree`, at its defaults). LightGBM fits it on `mse` only, so
+    `loss=l1` with it is refused. A row missing a feature its leaf uses gets the leaf's constant
+    output.
   - `loss` (`l1` default, ML4Investment's `TRAIN_OBJECTIVE`; or `mse`), `n_estimators` (100) and
     LightGBM's `num_leaves`, `min_data_in_leaf`, `learning_rate`, `feature_fraction`,
     `bagging_fraction`, `bagging_freq`, `lambda_l1`, `lambda_l2`, `max_depth`,

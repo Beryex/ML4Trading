@@ -12,8 +12,8 @@ subset of the features (``ml4trading/features/feature_sets/``; ``all`` is every 
 ``stock_id`` is ``categorical`` (the code is a LightGBM categorical feature, split on as
 ``cat_smooth``, ``min_data_per_group``, ``max_cat_threshold`` and ``cat_l2`` say) or ``drop``
 (the code is left out). With ``linear_tree`` each leaf of a tree holds a linear model on the
-features its path splits on (Shi, Li & Li 2019, "Gradient Boosting With Piece-Wise Linear
-Regression Trees"; ridge-penalised by ``linear_lambda``); a row that lacks one of those
+numerical features its path splits on (Shi, Li & Li 2019, "Gradient Boosting With Piece-Wise
+Linear Regression Trees"; ridge-penalised by ``linear_lambda``); a row that lacks one of those
 features gets the leaf's constant output instead. LightGBM fits it on ``mse`` only.
 
 A fit reproduces exactly only with ``deterministic`` and ``force_row_wise`` (ML4Investment's
