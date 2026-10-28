@@ -79,6 +79,15 @@ next open to exit at; `runs/<method>/backtest/metrics.json`):
 | `investment` (VOO) | 0.852 | $31,924 | +159.6 % | −31.9 % | −0.0 % | 0.99 |
 | `investment_tech` (QQQ) | 0.895 | $49,006 | +245.0 % | −36.6 % | +2.5 % | 1.17 |
 
+Whether one run's Sharpe really beats another's is a statistical question over a short sample.
+`python -m ml4trading.compare --run runs/linear --run runs/investment_tech` reads the two runs'
+`backtest/daily.csv` and prints the paired test of equal Sharpe ratios over their common
+sessions (Jobson & Korkie 1981 with Memmel's 2003 correction; it assumes iid returns, and
+Ledoit & Wolf 2008 is the robust alternative, not implemented). Given `--trials-sharpes FILE`
+(the annualized Sharpe of every strategy tried, one per line) it also prints the first run's
+deflated Sharpe ratio (Bailey & López de Prado 2014): the probability that its true Sharpe beats
+the best of that many trials without any skill. It writes nothing into the runs.
+
 ## The learned models
 
 `linear` and `nonlinear` predict each stock's next open-to-open return (K = 390, held overnight)
