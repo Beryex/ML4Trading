@@ -268,11 +268,12 @@ def _hpo_fit(
     n_trials: int | None,
 ) -> tuple[_Fit, dict]:
     """The fold's search (``ml4trading.hpo``) as the one validation fit it stands for, and the
-    ``hpo`` block of fold.json. The search fits on the train window and early-stops on the
-    universe's rows of the scored validation periods. The winner's configuration is the run's
-    with the winner's five parameters and the round it kept as ``n_estimators``: the deploy fit
-    stops there on its own window. A fold with nothing to fit -- no universe, or no fit window --
-    is not searched and stands for the run's own configuration, as a grid's empty fold does."""
+    ``hpo`` block of fold.json. The search fits on the train window, predicts the validation
+    window as a grid's fit does, and early-stops on the universe's rows of the scored validation
+    periods. The winner's configuration is the run's with the winner's five parameters and the
+    round it kept as ``n_estimators``: the deploy fit stops there on its own window. A fold with
+    nothing to fit -- no universe, or no fit window -- is not searched and stands for the run's
+    own configuration, as a grid's empty fold does."""
     record = {"timeout_s": timeout, "n_trials": 0, "best_number": None, "trials": []}
     universe = select_universe(frames.panel, fold.train, base.selector, pool)
     if not universe or fit_end is None:
@@ -285,6 +286,7 @@ def _hpo_fit(
         universe,
         timeout=timeout,
         n_trials=n_trials,
+        predict_window=fold.val,
     )
     best = found.best
     chosen = config_mod.apply_overrides(

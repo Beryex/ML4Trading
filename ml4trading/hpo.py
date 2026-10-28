@@ -97,9 +97,15 @@ def search_fold(
     *,
     timeout: float | None,
     n_trials: int | None,
+    predict_window=None,
 ) -> SearchResult:
     """Search ``SPACE`` for the fold fitted on ``fit_window`` and validated on ``eval_symbols``
     over ``eval_periods`` (K = 390: the periods are the evaluation sessions).
+
+    A trial predicts ``predict_window`` -- the window a grid's fit would predict, so that a
+    prediction that reads earlier sessions (``smooth_halflife``) is the one the same parameters
+    give in a grid; the early stopping reads only ``eval_periods``. Left out, the window is the
+    span of ``eval_periods``.
 
     The study stops after ``n_trials`` trials, or once ``timeout`` seconds have passed since the
     call, whichever comes first; one of them is required. The baseline trial always runs and
@@ -114,7 +120,7 @@ def search_fold(
     optuna.logging.set_verbosity(logging.WARNING)  # a trial per line is noise in a run's log
     started = time.perf_counter()
     model_class = get_model(cfg.method)
-    window = (min(eval_periods), max(eval_periods))
+    window = (min(eval_periods), max(eval_periods)) if predict_window is None else predict_window
     stop = EarlyStop(tuple(eval_periods), tuple(eval_symbols), MAX_ROUNDS, PATIENCE)
     kept: dict = {"value": float("inf")}  # the best trial's fit so far
 

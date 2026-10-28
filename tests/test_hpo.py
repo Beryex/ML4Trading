@@ -139,6 +139,32 @@ def test_the_winner_is_the_lowest_value_and_its_fit_is_kept(frames, eval_periods
     pd.testing.assert_frame_equal(found.result.predictions, refit.predictions)
 
 
+def test_a_search_predicts_the_window_it_is_given(frames, eval_periods):
+    # Smoothing reads the sessions before a predict window, so values depend on where the window
+    # starts. A search scored on the periods after the embargo still predicts the window it is
+    # given (the validation window a grid predicts), and only stops early on those periods.
+    scored = eval_periods[5:]
+    cfg = config.resolve("nonlinear", {"model.smooth_halflife": 3})
+    found = search_fold(
+        cfg, frames, FIT, scored, POOL, timeout=None, n_trials=2, predict_window=JUNE
+    )
+    assert set(found.result.predictions["period"]) == set(eval_periods)  # all of June
+    stop = EarlyStop(tuple(scored), tuple(POOL), MAX_ROUNDS, PATIENCE)
+    grid = get_model("nonlinear")(**{**cfg.model, **found.best.params}).fit_predict_fold(
+        frames, FIT, JUNE, stop
+    )
+    pd.testing.assert_frame_equal(found.result.predictions, grid.predictions)
+    # the window the search used to take, the scored periods' span, gives other values
+    span = get_model("nonlinear")(**{**cfg.model, **found.best.params}).fit_predict_fold(
+        frames, FIT, (min(scored), max(scored)), stop
+    )
+    shared = found.result.predictions.merge(
+        span.predictions, on=["period", "symbol"], suffixes=("", "_span")
+    )
+    assert len(shared) == len(span.predictions)
+    assert not shared["prediction"].equals(shared["prediction_span"])
+
+
 # Optuna checks the deadline before each trial and times at microsecond resolution, so on its own
 # it runs the baseline under 1e-9 only by chance, and never under 0
 @pytest.mark.parametrize("timeout", [1e-9, 0.0])
@@ -243,13 +269,43 @@ def test_train_with_hpo(learned_data, tmp_path, monkeypatch):
     ]
 
 
+def test_a_searched_fold_is_validated_like_a_grid_fit(learned_data, tmp_path, monkeypatch):
+    # With smoothing on, the winner's validation book must be the book a grid fit with the same
+    # parameters gives: the search predicts the fold's validation window, not just its scored
+    # periods.
+    fit_windows = []
+    real = hpo.search_fold
+
+    def spy(cfg, frames, fit_window, *args, **kwargs):
+        fit_windows.append(fit_window)
+        return real(cfg, frames, fit_window, *args, **kwargs)
+
+    monkeypatch.setattr("ml4trading.hpo.search_fold", spy)
+    overrides = {**SHORT_FOLDS, "model.smooth_halflife": 3}
+    run = train("nonlinear", tmp_path / "run", learned_data, overrides=overrides, hpo_trials=2)
+    frames = load_frames(config.resolve("nonlinear", overrides), learned_data)[1]
+    folds = _folds(run)
+    assert len(folds) == len(fit_windows) == 3
+    for (fold, fdir), fit_window in zip(folds, fit_windows, strict=True):
+        window = tuple(pd.Timestamp(day) for day in fold["val"])
+        grid = get_model("nonlinear")(**fold["model_params"]).fit_predict_fold(
+            frames, fit_window, window
+        )
+        val = pd.read_parquet(fdir / "val" / "predictions.parquet")
+        assert len(val) > 0
+        both = val.merge(grid.predictions, on=["period", "symbol"], suffixes=("", "_grid"))
+        assert len(both) == len(val)
+        assert both["prediction"].equals(both["prediction_grid"])
+
+
 def test_the_budget_is_split_evenly(learned_data, tmp_path, monkeypatch):
     seen = []
     real = hpo.search_fold
 
-    def spy(*args, timeout, n_trials):
+    def spy(*args, timeout, n_trials, **kwargs):
         seen.append((timeout, n_trials))
-        return real(*args, timeout=0.0, n_trials=1)  # the baseline alone, to keep the test short
+        # the baseline alone, to keep the test short
+        return real(*args, timeout=0.0, n_trials=1, **kwargs)
 
     monkeypatch.setattr("ml4trading.hpo.search_fold", spy)
     run = train("nonlinear", tmp_path / "run", learned_data, overrides=SHORT_FOLDS, hpo_hours=0.003)
