@@ -19,13 +19,21 @@ checks:
 
 * the fit may use only rows whose session lies inside ``fit_window`` (the trainer already ends
   it ``embargo_days`` sessions before whatever the fit is scored on, because a label ``y`` looks
-  one period ahead); ``fit_window`` is None when nothing is fittable;
+  one period ahead); ``fit_window`` is None when nothing is fittable. A model that trains on a
+  longer label (a learned model with ``horizon`` > 1) also drops the rows whose label exits
+  after the first session following ``fit_window``;
 * the prediction for period t may use only information from before t's open -- t's own bar
   does not exist yet.
 
 ``FoldResult.predictions`` has columns ``period``, ``symbol``, ``prediction`` (a predicted
 return of the period, same units as ``y``) over ``predict_window``; a missing (period, symbol)
 is simply not traded. The trainer keeps only the fold's universe.
+
+A learned model with ``horizon`` > 1 and ``horizon_scale`` ``sum`` predicts the return over its
+horizon, not over one period: the trader's cost gate then compares an h-session expectation with
+one round trip, the economically meaningful comparison for a position meant to be held about h
+sessions (Gârleanu & Pedersen 2013, "Dynamic Trading with Predictable Returns and Transaction
+Costs"). With ``mean`` the prediction keeps per-period units.
 """
 
 from __future__ import annotations
@@ -60,7 +68,9 @@ class FoldResult:
     all four None; a fit with no rows, the last three. A fit that stopped early on an evaluation
     set (``ml4trading.models.learned.base.EarlyStop``) records ``best_iteration``, the round it
     kept, and ``eval_mse``, the squared error on that set at that round; otherwise both are
-    None."""
+    None. ``horizon`` and ``horizon_scale`` are the label the fit trained on
+    (``ml4trading.models.learned.horizon``; 1 and ``sum``, one period's return, for a model with
+    no horizon): the validation scoring builds its labels the same way."""
 
     predictions: pd.DataFrame
     artifact: object | None
@@ -71,6 +81,8 @@ class FoldResult:
     label_transform: object | None = None
     best_iteration: int | None = None
     eval_mse: float | None = None
+    horizon: int = 1
+    horizon_scale: str = "sum"
 
 
 class Model(ABC):

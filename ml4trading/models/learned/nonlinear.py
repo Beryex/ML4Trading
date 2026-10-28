@@ -164,6 +164,7 @@ class LGBMArtifact(FitArtifact):
 @register_model("nonlinear")
 class NonlinearModel(LearnedModel):
     PARAMS = (
+        *LearnedModel.SHARED_PARAMS,
         "loss",
         "label",
         "feature_transform",

@@ -87,7 +87,7 @@ class LinearArtifact(FitArtifact):
 
 @register_model("linear")
 class LinearModel(LearnedModel):
-    PARAMS = ("alpha_ratio", "l1_ratio", "max_iter")
+    PARAMS = (*LearnedModel.SHARED_PARAMS, "alpha_ratio", "l1_ratio", "max_iter")
     loss = "mse"
 
     def __init__(self, hold_overnight: bool, **params):

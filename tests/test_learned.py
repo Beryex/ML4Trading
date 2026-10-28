@@ -16,13 +16,14 @@ from ml4trading.features import CALENDAR
 from ml4trading.models import FoldResult, Frames, get_model
 from ml4trading.models.base import empty_predictions, rows_in
 from ml4trading.models.learned.base import EarlyStop, FitArtifact, LearnedModel
+from ml4trading.models.learned.horizon import horizon_labels, realized_by
 from ml4trading.models.learned.labels import LabelTransform
 from ml4trading.models.learned.linear import impute_by_period
 from ml4trading.models.learned.losses import baseline_prediction, loss_value, oos_r2
 from ml4trading.models.learned.nonlinear import NonlinearModel
 from ml4trading.pipeline import load_frames
 from ml4trading.testing import assert_causal
-from ml4trading.train import _scored_val, train
+from ml4trading.train import _scored_val, _val_r2, train
 
 METHODS = ["linear", "nonlinear"]
 FIT = (pd.Timestamp("2021-03-01"), pd.Timestamp("2021-05-21"))
@@ -173,6 +174,8 @@ def test_two_fits_are_identical(frames, method):
         ("nonlinear", {"label": "raw"}),
         ("nonlinear", {"label": "demean_winsor"}),
         ("nonlinear", {"feature_transform": "cs_rank"}),
+        ("linear", {"horizon": 5}),
+        ("nonlinear", {"horizon": 5}),
     ],
 )
 def test_causal(learned_data, method, params):
@@ -1010,3 +1013,320 @@ def test_a_saved_early_stopped_fit_predicts_the_same(
     loaded = type(artifact).load(tmp_path / "model")
     assert loaded.booster.num_trees() == best  # the file keeps the best rounds' trees only
     assert np.array_equal(loaded.predict(X), artifact.predict(X))
+
+
+# ---- horizon labels (ml4trading/models/learned/horizon.py) ----
+
+SHARED_DEFAULTS = {
+    "horizon": 1,
+    "horizon_scale": "sum",
+    "smooth_halflife": 0,
+    "extra_features": False,
+}
+
+
+def _forward_sum(panel, h):
+    """Each row's sum of its symbol's next ``h`` labels by pandas' own reversed rolling window:
+    NaN unless all ``h`` exist and are finite. An independent reference for ``horizon_labels``."""
+    return (
+        panel.groupby("symbol", sort=False)["y"]
+        .transform(lambda y: y.iloc[::-1].rolling(h).sum().iloc[::-1])
+        .to_numpy()
+    )
+
+
+def _next_open_rule(panel, end):
+    """The fit-row rule from before horizons existed (a label exits at its symbol's next open),
+    kept here as the reference ``horizon: 1`` must still equal."""
+    later = panel.loc[panel["session"] > end, "session"]
+    if later.empty:
+        return np.ones(len(panel), dtype=bool)
+    exits = panel.groupby("symbol", observed=True, sort=False)["session"].shift(-1)
+    return (exits <= later.min()).to_numpy()
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_the_shared_parameters_default_to_todays_behaviour(method):
+    model = config.METHOD_DEFAULTS[method]["model"]
+    assert {k: model[k] for k in SHARED_DEFAULTS} == SHARED_DEFAULTS
+    for key in SHARED_DEFAULTS:  # all four are required of a learned model
+        short = {k: v for k, v in config.resolve(method).model.items() if k != key}
+        with pytest.raises(ValueError, match=f"missing parameter.*{key}"):
+            get_model(method)(**short)
+
+
+@pytest.mark.parametrize("method", METHODS)
+@pytest.mark.parametrize(
+    "params, match",
+    [
+        ({"horizon": 0}, "horizon must be"),
+        ({"horizon": -3}, "horizon must be"),
+        ({"horizon": 2.5}, "horizon must be"),
+        ({"horizon": True}, "horizon must be"),
+        ({"horizon": "5"}, "horizon must be"),
+        ({"horizon_scale": "median"}, "horizon_scale must be"),
+        ({"smooth_halflife": -1}, "smooth_halflife must be"),
+        ({"smooth_halflife": float("nan")}, "smooth_halflife must be"),
+        ({"smooth_halflife": float("inf")}, "smooth_halflife must be"),
+        ({"smooth_halflife": True}, "smooth_halflife must be"),
+        ({"smooth_halflife": "3"}, "smooth_halflife must be"),
+        ({"extra_features": 1}, "extra_features must be"),
+        ({"extra_features": "yes"}, "extra_features must be"),
+    ],
+)
+def test_a_bad_shared_parameter_is_refused(method, params, match):
+    try:
+        _model(method, **params)
+    except ValueError as err:
+        assert match in str(err)
+    else:
+        pytest.fail(f"{params} was accepted")
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_good_shared_parameters_are_accepted(method):
+    for params in (
+        {"horizon": 5, "horizon_scale": "mean"},
+        {"horizon": np.int64(3)},
+        {"smooth_halflife": 2.5},
+        {"smooth_halflife": 3, "extra_features": True},
+    ):
+        _model(method, **params)
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_defaults_are_bit_identical(frames, method):
+    f = frames[method]
+    default = _model(method).fit_predict_fold(f, FIT, JUNE)
+    spelled = _model(method, **SHARED_DEFAULTS).fit_predict_fold(f, FIT, JUNE)
+    pd.testing.assert_frame_equal(default.predictions, spelled.predictions, check_exact=True)
+    assert (default.n_fit_rows, default.baseline_prediction, default.fit_label_mean) == (
+        spelled.n_fit_rows,
+        spelled.baseline_prediction,
+        spelled.fit_label_mean,
+    )
+    # at horizon 1 the fit's rows are the labelled rows of the window, as they always were
+    window = rows_in(f.panel, FIT)
+    assert default.n_fit_rows == int(np.isfinite(window["y"].to_numpy(dtype=float)).sum())
+    assert (default.horizon, default.horizon_scale) == (1, "sum")
+    # the mean of one label is the label
+    mean1 = _model(method, horizon_scale="mean").fit_predict_fold(f, FIT, JUNE)
+    pd.testing.assert_frame_equal(default.predictions, mean1.predictions, check_exact=True)
+
+
+def test_horizon_one_purges_exactly_what_the_next_open_rule_purged(frames):
+    panel = frames["linear"].panel
+    in_gap = (panel["symbol"] == "BBB") & panel["session"].between("2021-05-24", "2021-06-04")
+    last = panel["session"].max()
+    ends = [
+        FIT[1],
+        pd.Timestamp("2021-05-22"),  # a weekend
+        pd.Timestamp("2021-06-03"),  # inside BBB's gap
+        last - pd.Timedelta(days=1),
+        last,
+        last + pd.Timedelta(days=10),
+        pd.Timestamp("2020-12-31"),
+    ]
+    for rows in (panel, panel[~in_gap].reset_index(drop=True)):
+        _, exits = horizon_labels(rows, 1, "sum")
+        for end in ends:
+            assert np.array_equal(realized_by(rows, exits, end), _next_open_rule(rows, end))
+
+
+@pytest.mark.parametrize("scale", ["sum", "mean"])
+def test_the_fit_trains_on_the_horizon_label(frames, monkeypatch, scale):
+    f = frames["nonlinear"]
+    result, _, y_fit = _fit_capturing(monkeypatch, f, horizon=3, horizon_scale=scale)
+    panel = f.panel
+    y_h = _forward_sum(panel, 3) / (3 if scale == "mean" else 1)
+    exits = panel.groupby("symbol", sort=False)["session"].shift(-3)
+    after = panel.loc[panel["session"] > FIT[1], "session"].min()
+    rows = (
+        panel["session"].between(*FIT).to_numpy() & np.isfinite(y_h) & (exits <= after).to_numpy()
+    )
+    assert result.n_fit_rows == int(rows.sum()) == len(y_fit)
+    assert np.allclose(y_fit, y_h[rows], rtol=0, atol=1e-12)
+    assert result.fit_label_mean == float(np.mean(y_fit))
+    assert (result.horizon, result.horizon_scale) == (3, scale)
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_the_fit_purges_unrealized_horizon_labels(frames, method):
+    # a fit row's 5-label window reaches into the sessions after the fit window for its last
+    # four rows; those rows are purged, so what happens after the window changes no prediction
+    f = frames[method]
+    model = lambda: _model(method, horizon=5)  # noqa: E731
+    want = model().fit_predict_fold(f, FIT, JUNE)
+    panel = f.panel.copy()
+    panel.loc[panel["session"] > FIT[1], "y"] += 0.5
+    got = model().fit_predict_fold(Frames(panel, f.X), FIT, JUNE)
+    pd.testing.assert_frame_equal(got.predictions, want.predictions)
+    assert got.n_fit_rows == want.n_fit_rows
+    # the purge removed the last four rows of each of the three symbols
+    one = _model(method).fit_predict_fold(f, FIT, JUNE)
+    assert want.n_fit_rows == one.n_fit_rows - 4 * 3
+    # not vacuous: a label inside the window, realized in time, does move the fit
+    inside = f.panel.copy()
+    inside.loc[inside["session"].between("2021-05-03", "2021-05-07"), "y"] += 0.5
+    moved = model().fit_predict_fold(Frames(inside, f.X), FIT, JUNE)
+    assert not moved.predictions.equals(want.predictions)
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_a_gap_in_a_horizon_window_purges_the_row(learned_data, method):
+    # BBB stops trading for 10 sessions right after the fit window. With h = 2 the labels of its
+    # last two fit rows both contain the one that exits at the open after the gap, inside the
+    # period the fit is scored on; AAA's and CCC's last row exits a session past the window's
+    model = _model(method, horizon=2)
+    pool = model.symbol_pool(all_symbols(learned_data))
+    loaded = model.loaded_symbols(pool)
+    bars, divs = load_bars(learned_data, loaded), load_dividends(learned_data, loaded)
+    sessions = bars["ts"].dt.tz_convert(TIMEZONE).dt.tz_localize(None).dt.normalize()
+    gap = sorted(sessions[sessions > FIT[1]].unique())[:10]
+    frames = model.build_frames(
+        bars[~((bars["symbol"] == "BBB") & sessions.isin(gap))], divs, 390, pool
+    )
+    panel = frames.panel
+    _, exits = horizon_labels(panel, 2, "sum")
+    in_fit = panel.index.isin(rows_in(panel, FIT).index)
+    purged = in_fit & ~realized_by(panel, exits, FIT[1])
+    assert panel.loc[purged, "symbol"].value_counts().to_dict() == {"BBB": 2, "AAA": 1, "CCC": 1}
+
+    want = model.fit_predict_fold(frames, FIT, JUNE)
+    last = rows_in(panel[panel["symbol"] == "BBB"], FIT).index[-1]
+    assert panel.loc[last, "session"] == FIT[1]
+    after_gap = panel.copy()
+    after_gap.loc[last, "y"] += 0.5  # the label that exits at the open after the gap
+    got = model.fit_predict_fold(Frames(after_gap, frames.X), FIT, JUNE)
+    pd.testing.assert_frame_equal(got.predictions, want.predictions)
+    assert got.n_fit_rows == want.n_fit_rows
+    # not vacuous: the label before it is realized in time, and is fitted
+    before = panel.copy()
+    before.loc[last - 1, "y"] += 0.5
+    assert before.loc[last - 1, "symbol"] == "BBB"
+    moved = model.fit_predict_fold(Frames(before, frames.X), FIT, JUNE)
+    assert not moved.predictions.equals(want.predictions)
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_validation_labels_respect_the_window(learned_data, tmp_path, method):
+    # Review Focus 2: with h = 3 the last two scored periods' labels exit after the window
+    overrides = {**SHORT_FOLDS, "model.horizon": 3}
+    run = train(method, tmp_path / "h3", learned_data, overrides=overrides)
+    one = train(method, tmp_path / "h1", learned_data, overrides=SHORT_FOLDS)
+    panel = load_frames(config.resolve(method), learned_data)[1].panel
+    ahead = panel.assign(ahead=_forward_sum(panel, 3))[["period", "symbol", "ahead"]]
+    folds = sorted((run / "folds").iterdir())
+    assert len(folds) == 3
+    for fdir in folds:
+        fold = json.loads((fdir / "fold.json").read_text())
+        val = pd.read_parquet(fdir / "val" / "predictions.parquet")
+        periods = sorted(val["period"].unique())
+        late = val["period"].isin(periods[-2:]).to_numpy()
+        assert len(periods) > 10 and late.sum() > 0
+        assert np.isnan(val.loc[late, "label"]).all()
+        assert np.isfinite(val.loc[~late, "label"]).all()
+        assert np.isfinite(val["y"]).all()  # the book and the IC keep the one-session return
+        expected = val.merge(ahead, on=["period", "symbol"])["ahead"].to_numpy()
+        assert np.allclose(val.loc[~late, "label"], expected[~late], rtol=0, atol=1e-12)
+        assert fold["model_params"]["horizon"] == 3
+        assert all(r is not None and np.isfinite(r) for r in fold["candidate_val_r2"])
+        assert np.isfinite(fold["val_diagnostics"]["r2_mse"])
+        # the one-session run scores the same rows with the same y
+        base = pd.read_parquet(one / "folds" / fdir.name / "val" / "predictions.parquet")
+        assert base["label"].notna().all()
+        assert base[["period", "symbol", "y"]].equals(val[["period", "symbol", "y"]])
+
+
+def test_a_grid_can_search_the_horizon(learned_data, tmp_path):
+    grid = {"model.horizon": [1, 3]}
+    run = train("linear", tmp_path / "run", learned_data, grid=grid, overrides=SHORT_FOLDS)
+    for fdir in sorted((run / "folds").iterdir()):
+        fold = json.loads((fdir / "fold.json").read_text())
+        r2 = fold["candidate_val_r2"]
+        assert len(r2) == 2 and all(r is not None and np.isfinite(r) for r in r2)
+        assert r2[0] != r2[1]  # each candidate is scored on labels of its own horizon
+        assert fold["model_params"]["horizon"] in (1, 3)
+
+
+def test_scored_val_leaves_unrealized_labels_out_of_the_cross_section():
+    days = pd.bdate_range("2021-01-04", periods=6)
+    nan = np.nan
+    panel = pd.DataFrame(
+        {
+            "period": [*days, *days],
+            "session": [*days, *days],
+            "symbol": ["A"] * 6 + ["B"] * 6,
+            "y": [0.01, 0.02, 0.03, 0.04, 0.05, nan, 0.10, 0.00, 0.20, 0.00, 0.10, nan],
+            "open_px": 10.0,
+        }
+    )
+    preds = pd.DataFrame({"period": days[:4], "symbol": "A", "prediction": 0.001})
+    fit = FoldResult(
+        empty_predictions(), None, 1, "mse", 0.0, 0.0, LabelTransform("demean"), None, None, 3
+    )
+    scored = _scored_val(fit, preds, panel, list(days[:4]))
+    # A's 3-label sums are .06 .09 .12; B's are .30 .20 .30: rows 0 and 1 exit by days[4] (the
+    # first session after the window), rows 2 and 3 after it
+    assert scored["y"].tolist() == [0.01, 0.02, 0.03, 0.04]  # the one-session return, all kept
+    assert np.allclose(
+        scored["label"], [-0.12, -0.055, nan, nan], rtol=0, atol=1e-15, equal_nan=True
+    )
+    assert _val_r2(
+        FoldResult(
+            empty_predictions(), None, 1, "mse", 0.0, 0.0, fit.label_transform, None, None, 3
+        ),
+        scored,
+    ) == pytest.approx(
+        1
+        - np.mean((np.array([-0.12, -0.055]) - 0.001) ** 2)
+        / np.mean(np.array([-0.12, -0.055]) ** 2)
+    )
+
+
+def test_the_validation_r2_scores_only_finite_labels():
+    fit = FoldResult(empty_predictions(), None, 1, "mse", 0.0, 0.0, LabelTransform("raw"))
+    scored = pd.DataFrame({"label": [0.01, np.nan, 0.03], "prediction": [0.01, 0.5, 0.02]})
+    # the model's squared error 1e-4 / 2 against the baseline's (1e-4 + 9e-4) / 2
+    assert _val_r2(fit, scored) == pytest.approx(1 - (0.5 * 1e-4) / (0.5 * 1e-3))
+    assert _val_r2(fit, scored.assign(label=np.nan)) is None
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_a_fold_records_its_horizon(frames, method):
+    f = frames[method]
+    result = _model(method, horizon=4, horizon_scale="mean").fit_predict_fold(f, FIT, JUNE)
+    assert (result.horizon, result.horizon_scale) == (4, "mean")
+    empty = _model(method, horizon=4).fit_predict_fold(
+        f, (pd.Timestamp("2020-01-01"), pd.Timestamp("2020-06-30")), JUNE
+    )
+    assert empty.artifact is None and (empty.horizon, empty.horizon_scale) == (4, "sum")
+
+
+def test_early_stopping_labels_respect_the_window(frames, monkeypatch):
+    f = frames["nonlinear"]
+    june = _periods_of(f, JUNE)
+    stop = EarlyStop(june, POOL, 50, 5)
+    result, eval_set = _early_stopping_capturing(monkeypatch, f, stop, horizon=3)
+    X_eval, y_eval, _ = eval_set
+    # the last two sessions of June exit after July's first open
+    assert set(X_eval.index.get_level_values("period")) == set(june[:-2])
+    assert np.isfinite(y_eval).all() and np.isfinite(result.eval_mse)
+    ahead = f.panel.assign(ahead=_forward_sum(f.panel, 3)).set_index(["period", "symbol"])["ahead"]
+    assert np.allclose(y_eval, ahead.reindex(X_eval.index).to_numpy(), rtol=0, atol=1e-12)
+    # at one session the whole month is evaluated, as always
+    _, one = _early_stopping_capturing(monkeypatch, f, stop)
+    assert set(one[0].index.get_level_values("period")) == set(june)
+
+
+def test_an_intraday_fit_keeps_its_rows_at_horizon_one(learned_data):
+    # without hold_overnight a label exits at its own close: nothing is purged at horizon 1, and
+    # a longer horizon is purged by the (safe) bound of the open of the row after its last label
+    cfg = config.resolve("linear", {"model.hold_overnight": False})
+    f = load_frames(cfg, learned_data)[1]
+    window = rows_in(f.panel, FIT)
+    one = get_model("linear")(**cfg.model).fit_predict_fold(f, FIT, JUNE)
+    assert one.n_fit_rows == len(window) == int(np.isfinite(window["y"]).sum())
+    cfg5 = config.resolve("linear", {"model.hold_overnight": False, "model.horizon": 5})
+    five = get_model("linear")(**cfg5.model).fit_predict_fold(f, FIT, JUNE)
+    assert five.n_fit_rows == one.n_fit_rows - 4 * 3

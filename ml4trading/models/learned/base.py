@@ -7,6 +7,11 @@ rows, the label, causality -- is here, so the methods cannot differ on it.
 A fit may also be given a validation evaluation set (``EarlyStop``): a booster then stops on its
 squared error there and keeps the best round. The set is built here, in the units the fit trains
 on, so that the label transform and the unlabelled rows are handled once for every method.
+
+The label is the horizon label (``ml4trading.models.learned.horizon``): the return over the next
+``horizon`` sessions, or ``horizon: 1``, the next session's, exactly as before. A fit uses only
+the rows whose label is realized by the first session after its window, and so does the
+early-stopping set after the last of its periods.
 """
 
 from __future__ import annotations
@@ -22,6 +27,12 @@ import pandas as pd
 from ml4trading.config import SESSION_MINUTES
 from ml4trading.features import FEATURE_ETFS, build_features
 from ml4trading.models.base import FoldResult, Frames, Model, empty_predictions, rows_in
+from ml4trading.models.learned.horizon import (
+    HORIZON_SCALES,
+    horizon_labels,
+    realized_by,
+    window_labels,
+)
 from ml4trading.models.learned.labels import fit_label_transform
 from ml4trading.models.learned.losses import baseline_prediction
 
@@ -69,6 +80,15 @@ class LearnedModel(Model):
 
     #: Every ``model.*`` key besides ``hold_overnight``; all are required.
     PARAMS: ClassVar[tuple[str, ...]] = ()
+    #: The keys every learned method takes, which its ``PARAMS`` includes: ``horizon`` and
+    #: ``horizon_scale`` shape the label (``ml4trading.models.learned.horizon``);
+    #: ``smooth_halflife`` and ``extra_features`` are only checked here, nothing reads them yet.
+    SHARED_PARAMS: ClassVar[tuple[str, ...]] = (
+        "horizon",
+        "horizon_scale",
+        "smooth_halflife",
+        "extra_features",
+    )
 
     def __init__(self, hold_overnight: bool, **params):
         unknown = sorted(set(params) - set(self.PARAMS))
@@ -78,6 +98,41 @@ class LearnedModel(Model):
                 f"{self.name}: unknown parameter(s) {unknown}, missing parameter(s) {missing}"
             )
         super().__init__(hold_overnight, **params)
+        self._check_shared_params()
+
+    def _check_shared_params(self) -> None:
+        """Refuse a bad value of a ``SHARED_PARAMS`` key the model has (a subclass whose
+        ``PARAMS`` omits one gets its default)."""
+        horizon, scale = self.params.get("horizon", 1), self.params.get("horizon_scale", "sum")
+        halflife = self.params.get("smooth_halflife", 0)
+        extra = self.params.get("extra_features", False)
+        if isinstance(horizon, bool) or not isinstance(horizon, int | np.integer) or horizon < 1:
+            raise ValueError(f"{self.name}: horizon must be an integer >= 1, got {horizon!r}")
+        if scale not in HORIZON_SCALES:
+            raise ValueError(
+                f"{self.name}: horizon_scale must be one of {HORIZON_SCALES}, got {scale!r}"
+            )
+        if (
+            isinstance(halflife, bool)
+            or not isinstance(halflife, int | float | np.integer | np.floating)
+            or not (np.isfinite(halflife) and halflife >= 0)
+        ):
+            raise ValueError(
+                f"{self.name}: smooth_halflife must be a number >= 0 (sessions; 0 is off), "
+                f"got {halflife!r}"
+            )
+        if not isinstance(extra, bool):
+            raise ValueError(f"{self.name}: extra_features must be true or false, got {extra!r}")
+
+    @property
+    def horizon(self) -> int:
+        """How many sessions of returns the label sums (or averages): 1 is the next session's."""
+        return int(self.params.get("horizon", 1))
+
+    @property
+    def horizon_scale(self) -> str:
+        """``sum`` or ``mean`` (``ml4trading.models.learned.horizon.HORIZON_SCALES``)."""
+        return str(self.params.get("horizon_scale", "sum"))
 
     @property
     @abstractmethod
@@ -133,34 +188,40 @@ class LearnedModel(Model):
         and the row order, and may use only the values of the row's own period."""
         return X
 
-    def _realized_by(self, panel: pd.DataFrame, end: pd.Timestamp) -> np.ndarray:
-        """Rows whose label is known by the first session after ``end``. Overnight, a label exits
-        at the symbol's NEXT period's open, which a gap in its data can push past the embargo
-        into the window the fit is scored on; intraday it exits at its own close. ``panel`` is
-        in (symbol, period) order, as ``build_panel`` returns it."""
-        if not self.hold_overnight:
+    def _realized_by(
+        self, panel: pd.DataFrame, end: pd.Timestamp, exit_session: np.ndarray
+    ) -> np.ndarray:
+        """Rows whose label is known by the first session after ``end``: the label's exit
+        (``exit_session``, from ``horizon_labels``) is on or before it. Overnight, a label exits
+        at the open of the symbol's row ``horizon`` ahead -- the next one at ``horizon: 1`` --
+        which a gap in its data can push past the embargo into the window the fit is scored on.
+        Intraday at ``horizon: 1`` it exits at its own close, inside the window; a longer
+        intraday label exits at the close of the row before that open, which that open bounds, so
+        the same rule keeps it. ``panel`` is in (symbol, period) order, as ``build_panel``
+        returns it."""
+        if not self.hold_overnight and self.horizon == 1:
             return np.ones(len(panel), dtype=bool)
-        later = panel.loc[panel["session"] > end, "session"]
-        if later.empty:
-            return np.ones(len(panel), dtype=bool)
-        exits = panel.groupby("symbol", observed=True, sort=False)["session"].shift(-1)
-        return (exits <= later.min()).to_numpy()
+        return realized_by(panel, exit_session, end)
 
     @staticmethod
     def _evaluation_rows(
-        panel: pd.DataFrame, X: pd.DataFrame, transform, early_stop: EarlyStop
+        panel: pd.DataFrame,
+        X: pd.DataFrame,
+        transform,
+        early_stop: EarlyStop,
+        horizon: int = 1,
+        horizon_scale: str = "sum",
     ) -> tuple[pd.DataFrame, np.ndarray, EarlyStop]:
         """The early-stopping set: the rows of ``early_stop.periods`` x ``early_stop.symbols``
-        with a finite ``y`` (a symbol's last overnight period has none), and their label through
-        the fold's ``transform``. As in the validation scoring, the transform is applied to every
+        with a label (a symbol's last overnight period has none), and their label through the
+        fold's ``transform`` (``ml4trading.models.learned.horizon.window_labels``). A
+        ``horizon`` label that exits after the first session following the last of the periods
+        is no label, as in the validation scoring. As there, the transform is applied to every
         pool row of those periods, so a period's mean is the pool's cross-section the fit
         demeaned over, and only then taken at the evaluation rows. ``X`` is indexed by
         (period, symbol), row-aligned with ``panel``."""
-        y = panel["y"].to_numpy(dtype=float)
-        labelled = panel["period"].isin(set(early_stop.periods)).to_numpy() & np.isfinite(y)
-        label = np.full(len(panel), np.nan)
-        label[labelled] = transform.apply(y[labelled], panel["period"].to_numpy()[labelled])
-        rows = labelled & panel["symbol"].isin(set(early_stop.symbols)).to_numpy()
+        label = window_labels(panel, early_stop.periods, horizon, horizon_scale, transform)
+        rows = np.isfinite(label) & panel["symbol"].isin(set(early_stop.symbols)).to_numpy()
         if not rows.any():
             raise ValueError("early stopping: no labelled evaluation row")
         return X[rows], label[rows], early_stop
@@ -174,18 +235,31 @@ class LearnedModel(Model):
                 [panel["period"], panel["symbol"]], names=["period", "symbol"]
             )
         )
+        y_h, exit_session = horizon_labels(panel, self.horizon, self.horizon_scale)
         fit = np.zeros(len(panel), dtype=bool)
         if fit_window is not None:
             fit[panel.index.get_indexer(rows_in(panel, fit_window).index)] = True
-            fit &= np.isfinite(panel["y"].to_numpy(dtype=float))
-            fit &= self._realized_by(panel, pd.Timestamp(fit_window[1]))
+            fit &= np.isfinite(y_h)
+            fit &= self._realized_by(panel, pd.Timestamp(fit_window[1]), exit_session)
         if not fit.any():
-            return FoldResult(empty_predictions(), None, 0, self.loss, None)
-        y_raw, period = panel["y"].to_numpy(dtype=float)[fit], panel["period"].to_numpy()[fit]
+            return FoldResult(
+                empty_predictions(),
+                None,
+                0,
+                self.loss,
+                None,
+                horizon=self.horizon,
+                horizon_scale=self.horizon_scale,
+            )
+        y_raw, period = y_h[fit], panel["period"].to_numpy()[fit]
         transform = fit_label_transform(self.label_kind, y_raw, period)
         y_fit = transform.apply(y_raw, period)
         eval_set = (
-            None if early_stop is None else self._evaluation_rows(panel, X, transform, early_stop)
+            None
+            if early_stop is None
+            else self._evaluation_rows(
+                panel, X, transform, early_stop, self.horizon, self.horizon_scale
+            )
         )
         # a model that cannot stop early may declare ``_fit`` without ``eval_set``
         artifact = (
@@ -211,4 +285,6 @@ class LearnedModel(Model):
             transform,
             artifact.best_iteration,
             artifact.eval_mse,
+            self.horizon,
+            self.horizon_scale,
         )

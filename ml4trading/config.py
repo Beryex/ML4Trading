@@ -137,6 +137,16 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             "hold_overnight": True,
             "alpha_ratio": 0.01,  # a point of grids/linear.yaml
             "l1_ratio": 0.5,  # scikit-learn ElasticNet's default
+            # the next session's return, as before; a longer label looks that many sessions ahead
+            # (Jegadeesh & Titman 1993 and Gu, Kelly & Xiu 2020 predict at monthly horizons)
+            "horizon": 1,
+            # the label is the sum of the horizon's returns; "mean": their average, per-session
+            # units (the units a cost gate sees: Gârleanu & Pedersen 2013)
+            "horizon_scale": "sum",
+            # these two are checked by the model and read by nothing yet; today's behaviour is
+            # smooth_halflife 0 (sessions; 0 = off) and extra_features False
+            "smooth_halflife": 0,
+            "extra_features": False,
             # a convergence cap, not a model choice: scikit-learn's default 1000 stops short at the
             # grid's smallest alpha_ratio, which took 59,010 iterations (0.4 s) on a full fit slice
             # and up to 241,123 on the synthetic test data
@@ -154,6 +164,16 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             "feature_transform": "none",  # the features as they are; "cs_rank": ranked per period
             "stock_id": "categorical",  # the stock code as a categorical feature; "drop": unused
             "feature_set": "all",  # every column; or a name in ml4trading/features/feature_sets/
+            # the next session's return, as before; a longer label looks that many sessions ahead
+            # (Jegadeesh & Titman 1993 and Gu, Kelly & Xiu 2020 predict at monthly horizons)
+            "horizon": 1,
+            # the label is the sum of the horizon's returns; "mean": their average, per-session
+            # units (the units a cost gate sees: Gârleanu & Pedersen 2013)
+            "horizon_scale": "sum",
+            # these two are checked by the model and read by nothing yet; today's behaviour is
+            # smooth_halflife 0 (sessions; 0 = off) and extra_features False
+            "smooth_halflife": 0,
+            "extra_features": False,
             "num_leaves": 31,
             "min_data_in_leaf": 20,
             "learning_rate": 0.1,

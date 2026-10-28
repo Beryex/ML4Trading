@@ -63,6 +63,7 @@ from ml4trading.folds import embargoed_end, fold_at, fold_boundaries
 from ml4trading.importance import importance_table
 from ml4trading.models import FoldResult, Frames, get_model
 from ml4trading.models.base import empty_predictions
+from ml4trading.models.learned.horizon import window_labels
 from ml4trading.models.learned.losses import oos_r2
 from ml4trading.pipeline import (
     benchmark_returns,
@@ -106,21 +107,22 @@ def _scored_val(
 ) -> pd.DataFrame:
     """The validation rows a candidate is scored on: the universe's predictions in ``periods``
     next to the realized return ``y``, the entry price ``open_px`` and ``label``, the target in
-    the fit's units: ``y`` through the fit's label transform (``result`` is the fit it will be
-    read from), or ``y`` itself when it has none. The transform is applied to every pool row of
-    ``periods``, not just the universe's, so a period's mean is the pool's cross-section the fit
-    demeaned over. Only rows with a finite ``y`` count: a symbol's last overnight period has none
-    (and so no exit price), and neither the IC, the R² nor the cost-gate replay can use it."""
-    in_scope = panel[panel["period"].isin(set(periods))]
-    pool = in_scope[np.isfinite(in_scope["y"].to_numpy(dtype=float))]
+    the fit's units: the fit's horizon label through its label transform (``result`` is the fit
+    it will be read from; ``ml4trading.models.learned.horizon.window_labels``), or ``y`` itself
+    when it has none. The transform is applied to every pool row of ``periods``, not just the
+    universe's, so a period's mean is the pool's cross-section the fit demeaned over. Only rows
+    with a finite ``y`` count: a symbol's last overnight period has none (and so no exit price),
+    and neither the IC, the R² nor the cost-gate replay can use it. A row keeps its one-period
+    ``y`` whatever the horizon, so the IC and the book are the same at every horizon; its
+    ``label`` is NaN where the horizon label is unknown or exits after the first session
+    following the last of ``periods`` (with ``horizon`` > 1, the last periods')."""
     transform = None if result is None else result.label_transform
-    label = (
-        pool["y"]
-        if transform is None
-        else transform.apply(pool["y"].to_numpy(dtype=float), pool["period"].to_numpy())
-    )
+    horizon, scale = (1, "sum") if result is None else (result.horizon, result.horizon_scale)
+    in_scope = panel["period"].isin(set(periods)).to_numpy()
+    pooled = in_scope & np.isfinite(panel["y"].to_numpy(dtype=float))
+    label = window_labels(panel, periods, horizon, scale, transform)[pooled]
     scored = preds[preds["period"].isin(set(periods))].merge(
-        pool[["period", "symbol", "y", "open_px"]].assign(label=label),
+        panel[pooled][["period", "symbol", "y", "open_px"]].assign(label=label),
         on=["period", "symbol"],
     )
     return scored[_SCORED_COLUMNS].reset_index(drop=True)
@@ -137,10 +139,12 @@ def _scored_features(frames: Frames, scored: pd.DataFrame) -> pd.DataFrame:
 
 def _val_r2(result: FoldResult | None, scored: pd.DataFrame) -> float | None:
     """The out-of-sample R² of the scored rows' predictions against the fit's baseline, under
-    the fit's loss; None for a model that fits no loss."""
+    the fit's loss, over the rows with a label; None for a model that fits no loss."""
     if result is None or result.loss is None:
         return None
-    return oos_r2(scored["label"], scored["prediction"], result.baseline_prediction, result.loss)
+    label, prediction = scored["label"].to_numpy(dtype=float), scored["prediction"].to_numpy()
+    known = np.isfinite(label)
+    return oos_r2(label[known], prediction[known], result.baseline_prediction, result.loss)
 
 
 class _Fit(NamedTuple):
