@@ -24,6 +24,9 @@ Public API:
 - ``symbol_daily_features(bars)`` -- one symbol's unshifted daily features;
 - ``load_feature_set(name)`` -- the columns of a named subset (``feature_sets/<name>.txt``), or
   None for ``"all"``;
+- ``slow_features(bars, pool)`` -- the pool's slow cross-sectional features from the published
+  literature (``features/slow.py``): a float32 frame indexed by (session, symbol) like
+  ``build_features``, one column per name in ``SLOW_FEATURES``;
 - ``CALENDAR``, ``FEATURE_ETFS``, ``SCALE_DEPENDENT``.
 """
 
@@ -35,12 +38,15 @@ from ml4trading.features.build import (
     load_feature_set,
 )
 from ml4trading.features.daily import symbol_daily_features
+from ml4trading.features.slow import SLOW_FEATURES, slow_features
 
 __all__ = [
     "CALENDAR",
     "FEATURE_ETFS",
     "SCALE_DEPENDENT",
+    "SLOW_FEATURES",
     "build_features",
     "load_feature_set",
+    "slow_features",
     "symbol_daily_features",
 ]

@@ -143,9 +143,12 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             # the label is the sum of the horizon's returns; "mean": their average, per-session
             # units (the units a cost gate sees: Gârleanu & Pedersen 2013)
             "horizon_scale": "sum",
-            # these two are checked by the model and read by nothing yet; today's behaviour is
-            # smooth_halflife 0 (sessions; 0 = off) and extra_features False
+            # checked by the model and read by nothing yet; today's behaviour is 0 (sessions;
+            # 0 = off)
             "smooth_halflife": 0,
+            # False: ML4Investment's features alone; True adds the slow cross-sectional features
+            # from the literature (ml4trading/features/slow.py). Fixed for a run: it cannot be
+            # searched in a grid
             "extra_features": False,
             "feature_set": "all",  # every column; or a name in ml4trading/features/feature_sets/
             # a convergence cap, not a model choice: scikit-learn's default 1000 stops short at the
@@ -171,9 +174,12 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             # the label is the sum of the horizon's returns; "mean": their average, per-session
             # units (the units a cost gate sees: Gârleanu & Pedersen 2013)
             "horizon_scale": "sum",
-            # these two are checked by the model and read by nothing yet; today's behaviour is
-            # smooth_halflife 0 (sessions; 0 = off) and extra_features False
+            # checked by the model and read by nothing yet; today's behaviour is 0 (sessions;
+            # 0 = off)
             "smooth_halflife": 0,
+            # False: ML4Investment's features alone; True adds the slow cross-sectional features
+            # from the literature (ml4trading/features/slow.py). Fixed for a run: it cannot be
+            # searched in a grid
             "extra_features": False,
             "num_leaves": 31,
             "min_data_in_leaf": 20,

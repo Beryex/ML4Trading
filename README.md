@@ -100,6 +100,20 @@ universe decides what is traded.
   prices are multiplied and its volume divided by the same factor is dropped (58 of
   ML4Investment's per-stock features: price and volume levels, ATR and MACD in price units,
   OBV, ranges, ratios over such a level); a test holds the list equal to that rule.
+- **Slow features** (`--set model.extra_features=true`; both models, off by default): thirteen
+  cross-sectional features from the literature, built from the same bars
+  (`ml4trading/features/slow.py`) and added after the others: `mom_12_1` and `mom_6_1`
+  (Jegadeesh & Titman 1993), `mom_1m` (Jegadeesh 1990), `high_52w` (George & Hwang 2004),
+  `max_21` (Bali, Cakici & Whitelaw 2011), `beta_252` (Frazzini & Pedersen 2014), `ivol_63`
+  (Ang, Hodrick, Xing & Zhang 2006), `resid_mom_12_1` (Blitz, Huij & Martens 2011), `amihud_21`
+  (Amihud 2002), `rskew_21` (Amaya, Christoffersen, Jacobs & Vasquez 2015), `overnight_21` and
+  `intraday_21` (Lou, Polk & Skouras 2019), and `volatility_252`. Each is a ratio, a return or a
+  dollar volume, so a split leaves it unchanged (a test holds it), and each is NaN until its
+  window of the stock's own sessions is full -- the year-long ones for a stock's first 252
+  sessions. The market-relative ones (`beta_252`, `ivol_63`, `resid_mom_12_1`) are measured
+  against VOO on the sessions both have. They are columns like any other: `cs_rank` ranks them,
+  and a feature set may name them (refused by name unless `extra_features` is on). The option
+  is built into the run's frames, so it is fixed for a run and cannot be searched in a grid.
 - **`linear`**: an elastic net on the standardized features. A missing value is replaced by the
   median of its feature over the same session's stocks; the penalty is a fraction `alpha_ratio`
   of the smallest one that zeroes every coefficient (scikit-learn's `ElasticNetCV` convention).

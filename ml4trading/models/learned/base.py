@@ -12,6 +12,11 @@ The label is the horizon label (``ml4trading.models.learned.horizon``): the retu
 ``horizon`` sessions, or ``horizon: 1``, the next session's, exactly as before. A fit uses only
 the rows whose label is realized by the first session after its window, and so does the
 early-stopping set after the last of its periods.
+
+The features are ML4Investment's (``ml4trading.features.build_features``); with ``extra_features``
+the slow cross-sectional features of ``ml4trading.features.slow`` are joined on after them, before
+the model's own transform of the features, so a transform sees the new columns too. The frames are
+built once per run, so ``extra_features`` is a frame parameter: a grid may not search it.
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 from ml4trading.config import SESSION_MINUTES
-from ml4trading.features import FEATURE_ETFS, build_features, load_feature_set
+from ml4trading.features import FEATURE_ETFS, build_features, load_feature_set, slow_features
 from ml4trading.models.base import FoldResult, Frames, Model, empty_predictions, rows_in
 from ml4trading.models.learned.horizon import (
     HORIZON_SCALES,
@@ -80,9 +85,14 @@ class LearnedModel(Model):
 
     #: Every ``model.*`` key besides ``hold_overnight``; all are required.
     PARAMS: ClassVar[tuple[str, ...]] = ()
+    #: The keys ``build_frames`` reads: ``extra_features`` adds the slow features to the frames,
+    #: so it is fixed for a run (``Model.FRAME_PARAMS``). A subclass with frame parameters of its
+    #: own extends this tuple.
+    FRAME_PARAMS: ClassVar[tuple[str, ...]] = (*Model.FRAME_PARAMS, "extra_features")
     #: The keys every learned method takes, which its ``PARAMS`` includes: ``horizon`` and
     #: ``horizon_scale`` shape the label (``ml4trading.models.learned.horizon``);
-    #: ``smooth_halflife`` and ``extra_features`` are only checked here, nothing reads them yet.
+    #: ``extra_features`` adds the slow features to the frames (``build_frames``);
+    #: ``smooth_halflife`` is only checked here, nothing reads it yet.
     SHARED_PARAMS: ClassVar[tuple[str, ...]] = (
         "horizon",
         "horizon_scale",
@@ -147,6 +157,11 @@ class LearnedModel(Model):
         return columns
 
     @property
+    def extra_features(self) -> bool:
+        """Whether the frames also hold the slow features (``ml4trading.features.slow``)."""
+        return bool(self.params.get("extra_features", False))
+
+    @property
     def horizon(self) -> int:
         """How many sessions of returns the label sums (or averages): 1 is the next session's."""
         return int(self.params.get("horizon", 1))
@@ -198,8 +213,11 @@ class LearnedModel(Model):
         keys = pd.MultiIndex.from_arrays(
             [panel["session"], panel["symbol"]], names=["session", "symbol"]
         )
-        X = build_features(bars, pool).reindex(keys)
-        X = X.set_axis(panel.index)
+        X = build_features(bars, pool).reindex(keys).set_axis(panel.index)
+        if self.extra_features:
+            slow = slow_features(bars, pool).reindex(keys).set_axis(panel.index)
+            # the frames share their (copy-on-write) columns: the join copies none of X's
+            X = pd.concat([X, slow], axis=1)
         return Frames(panel, self._transform_features(X, panel))
 
     def _transform_features(self, X: pd.DataFrame, panel: pd.DataFrame) -> pd.DataFrame:

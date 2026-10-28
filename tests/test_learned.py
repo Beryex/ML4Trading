@@ -607,7 +607,7 @@ def test_feature_transform_cannot_be_searched(learned_data, tmp_path, monkeypatc
         raise AssertionError("the data was loaded before the grid was checked")
 
     monkeypatch.setattr("ml4trading.train.load_frames", no_loading)
-    assert NonlinearModel.FRAME_PARAMS == ("hold_overnight", "feature_transform")
+    assert NonlinearModel.FRAME_PARAMS == ("hold_overnight", "extra_features", "feature_transform")
     with pytest.raises(ValueError, match="feature_transform.*cannot be searched"):
         train(
             "nonlinear",

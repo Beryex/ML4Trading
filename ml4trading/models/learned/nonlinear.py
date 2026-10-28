@@ -173,8 +173,9 @@ class NonlinearModel(LearnedModel):
         "n_estimators",
         *BOOSTING_PARAMS,
     )
-    #: The features are built once per run, with ``feature_transform`` applied.
-    FRAME_PARAMS = ("hold_overnight", "feature_transform")
+    #: The features are built once per run, with ``extra_features`` joined and
+    #: ``feature_transform`` applied.
+    FRAME_PARAMS = (*LearnedModel.FRAME_PARAMS, "feature_transform")
 
     def __init__(self, hold_overnight: bool, **params):
         super().__init__(hold_overnight, **params)
