@@ -101,7 +101,33 @@ universe decides what is traded.
   The stock code is not used.
 - **`nonlinear`**: LightGBM, by default on the absolute error as in ML4Investment, with the stock
   code as a categorical feature; missing values go in as they are. Fits are deterministic (a
-  fixed seed and thread count).
+  fixed seed and thread count). Its `model.*` options (`--set model.label=demean`, or a list in
+  a grid), at their defaults in `ml4trading/config.py`; the defaults are the plain fit:
+  - `label`: what the fit trains on in place of the raw next-open return. `raw` (default);
+    `demean`, less the mean of the period's stocks, so the model learns which names beat the
+    others, not where the market went; `winsor`, clipped to the 0.5 % and 99.5 % quantiles of the
+    fold's fit labels (ML4Investment's `CLIP_LOWER_QUANTILE_RATIO` and
+    `CLIP_UPPER_QUANTILE_RATIO`); `demean_winsor`, both, demeaning first. The validation scoring
+    puts the realized returns through the same transform.
+  - `feature_transform`: `none` (default), or `cs_rank`, which replaces each stock-specific
+    feature, period by period, by its cross-sectional rank scaled to [-1, 1] (Gu, Kelly & Xiu 2020,
+    "Empirical Asset Pricing via Machine Learning"). The stock code, VOO's and QQQ's columns and
+    the calendar columns are left as they are. The ranks are built into the run's frames, so this
+    one is fixed for a run and cannot be searched in a grid.
+  - `stock_id`: `categorical` (default) gives LightGBM the stock code as a categorical feature;
+    `drop` leaves it out.
+  - `feature_set`: `all` (default) trains on every column; any other name is a file
+    `ml4trading/features/feature_sets/<name>.txt` listing the columns to train on, one per line
+    (the format is in `feature_sets/FORMAT.md`). A set has to list `stock_id` unless `stock_id`
+    is `drop`, and a column the features do not have is refused by name.
+  - `cat_smooth` (10.0), `min_data_per_group` (100), `max_cat_threshold` (32) and `cat_l2`
+    (10.0): how LightGBM splits on the categorical stock code, at LightGBM's own defaults
+    ([Parameters](https://lightgbm.readthedocs.io/en/stable/Parameters.html), "Learning Control
+    Parameters"). They have no effect under `stock_id=drop`.
+  - `loss` (`l1` default, ML4Investment's `TRAIN_OBJECTIVE`; or `mse`), `n_estimators` (100) and
+    LightGBM's `num_leaves`, `min_data_in_leaf`, `learning_rate`, `feature_fraction`,
+    `bagging_fraction`, `bagging_freq`, `lambda_l1`, `lambda_l2`, `max_depth`,
+    `min_gain_to_split`, `min_sum_hessian_in_leaf` and `max_bin`, all at LightGBM's defaults.
 - **Grids** (`grids/linear.yaml`, `grids/nonlinear.yaml`) are searched per fold on validation net
   Sharpe like any method's. Each fold also records every candidate's out-of-sample R², against
   the constant fitted on its training rows (`candidate_val_r2` in `fold.json`); it is never

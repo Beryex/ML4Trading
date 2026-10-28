@@ -6,6 +6,7 @@ from __future__ import annotations
 import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,13 @@ FEATURE_ETFS = ("VOO", "QQQ")
 #: (but for a gap in a symbol's data). A cross-sectional transform of the features leaves them
 #: as they are: ranked within a session they would collapse to one value.
 CALENDAR = ("Weekday", "Month", "Day_of_Month", "Day_of_Year", "Week_of_Year", "Week_of_Quarter")
+
+#: Where the named feature sets live: ``<name>.txt``, one column name per line (the format is in
+#: ``feature_sets/FORMAT.md``). A module constant so that a test can point the lookup elsewhere.
+FEATURE_SETS_DIR = Path(__file__).parent / "feature_sets"
+
+#: The set name that stands for every column the build produces.
+ALL_FEATURES = "all"
 
 #: Every column that a stock's price/volume scale moves (price and volume levels, indicators in
 #: price units, and ratios with a level in the denominator). Dropped: the bars are split-adjusted
@@ -219,3 +227,24 @@ def build_features(bars: pd.DataFrame, pool: list[str], workers: int | None = No
     stock_id = features.index.get_level_values("symbol").map(codes).astype(np.float32)
     features.insert(0, "stock_id", np.asarray(stock_id))
     return features
+
+
+def load_feature_set(name: str) -> list[str] | None:
+    """The columns of the named feature set, in the file's order; None for ``"all"`` (every
+    column). A file holds one column name per line; blank lines, lines starting with ``#`` and
+    the whitespace around a name are ignored. An unknown name, an empty set or a column listed
+    twice raises ``ValueError``; whether the columns exist is for the model to check against the
+    features it is given."""
+    known = sorted({ALL_FEATURES, *(p.stem for p in FEATURE_SETS_DIR.glob("*.txt"))})
+    if name not in known:
+        raise ValueError(f"unknown feature set {name!r}; known: {known}")
+    if name == ALL_FEATURES:
+        return None
+    lines = (FEATURE_SETS_DIR / f"{name}.txt").read_text().splitlines()
+    columns = [c for c in (line.strip() for line in lines) if c and not c.startswith("#")]
+    if not columns:
+        raise ValueError(f"feature set {name!r} is empty")
+    repeated = sorted({c for c in columns if columns.count(c) > 1})
+    if repeated:
+        raise ValueError(f"feature set {name!r} lists {repeated} more than once")
+    return columns

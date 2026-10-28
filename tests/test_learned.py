@@ -622,3 +622,184 @@ def test_bad_feature_transform_is_refused():
     del params["feature_transform"]
     with pytest.raises(ValueError, match="missing parameter.*feature_transform"):
         get_model("nonlinear")(**params)
+
+
+def _feature_sets(monkeypatch, tmp_path, **sets):
+    """Point the named-set lookup at ``tmp_path`` holding one ``<name>.txt`` per keyword."""
+    for name, text in sets.items():
+        (tmp_path / f"{name}.txt").write_text(text)
+    monkeypatch.setattr("ml4trading.features.build.FEATURE_SETS_DIR", tmp_path)
+
+
+def test_stock_id_can_be_dropped(frames):
+    f = frames["nonlinear"]
+    result = _model("nonlinear", stock_id="drop").fit_predict_fold(f, FIT, JUNE)
+    assert result.artifact.feature_names() == [c for c in f.X.columns if c != "stock_id"]
+    assert len(result.predictions) > 0 and np.isfinite(result.predictions["prediction"]).all()
+    kept = _model("nonlinear").fit_predict_fold(f, FIT, JUNE).artifact
+    assert kept.feature_names() == list(f.X.columns)
+    # the booster's own record: stock_id was a categorical feature in one fit, in no other
+    assert "[categorical_feature: 0]" in kept.booster.model_to_string()
+    assert "[categorical_feature: ]" in result.artifact.booster.model_to_string()
+
+
+def test_bad_stock_id_is_refused():
+    with pytest.raises(ValueError, match="stock_id.*numeric"):
+        _model("nonlinear", stock_id="numeric")
+    with pytest.raises(ValueError, match="unknown parameter.*stock_id"):
+        _model("linear", stock_id="drop")  # linear has no such parameter
+
+
+def test_categorical_parameters_reach_lightgbm(frames):
+    booster = (
+        _model("nonlinear", cat_smooth=5.0)
+        .fit_predict_fold(frames["nonlinear"], FIT, JUNE)
+        .artifact.booster
+    )
+    text = booster.model_to_string()
+    assert "[cat_smooth: 5]" in text
+    # the other three stay at LightGBM's defaults
+    for line in ("min_data_per_group: 100", "max_cat_threshold: 32", "cat_l2: 10"):
+        assert f"[{line}]" in text
+
+
+def test_load_feature_set(monkeypatch, tmp_path):
+    from ml4trading.features.build import load_feature_set
+
+    _feature_sets(
+        monkeypatch,
+        tmp_path,
+        tiny="# a comment\nstock_id\n\n  Returns_1h_mean  \n# another\nWeekday\n",
+        empty="# nothing but a comment\n\n",
+        twice="Weekday\nMonth\nWeekday\n",
+    )
+    assert load_feature_set("all") is None
+    assert load_feature_set("tiny") == ["stock_id", "Returns_1h_mean", "Weekday"]
+    with pytest.raises(ValueError, match=r"nope.*known.*all.*empty.*tiny.*twice"):
+        load_feature_set("nope")
+    with pytest.raises(ValueError, match="empty"):
+        load_feature_set("empty")
+    with pytest.raises(ValueError, match="Weekday.*twice|twice.*Weekday"):
+        load_feature_set("twice")
+
+
+def test_a_feature_set_limits_the_columns(frames, monkeypatch, tmp_path):
+    f = frames["nonlinear"]
+    chosen = ["Weekday", "stock_id", "Returns_1h_mean", "Volatility_5d"]
+    _feature_sets(
+        monkeypatch,
+        tmp_path,
+        tmp_test="# four columns, the stock code among them\n" + "\n".join(chosen) + "\n",
+        no_code="Weekday\nReturns_1h_mean\n",
+        unknown="Weekday\nstock_id\nNo_Such_Feature\n",
+    )
+    result = _model("nonlinear", feature_set="tmp_test").fit_predict_fold(f, FIT, JUNE)
+    artifact = result.artifact
+    assert artifact.feature_names() == chosen  # the set's own order
+    assert "[categorical_feature: 1]" in artifact.booster.model_to_string()  # stock_id is 1
+    assert len(result.predictions) > 0 and np.isfinite(result.predictions["prediction"]).all()
+    # the artifact reads its columns out of the full frame, saved or not
+    X = _keyed(f, JUNE)
+    assert np.array_equal(artifact.predict(X), artifact.predict(X[chosen]))
+
+    # stock_id="drop" removes the code from a set that lists it
+    dropped = _model("nonlinear", feature_set="tmp_test", stock_id="drop")
+    names = dropped.fit_predict_fold(f, FIT, JUNE).artifact.feature_names()
+    assert names == [c for c in chosen if c != "stock_id"]
+
+    # a column the features lack is refused, by name
+    with pytest.raises(ValueError, match="No_Such_Feature"):
+        _model("nonlinear", feature_set="unknown").fit_predict_fold(f, FIT, JUNE)
+    # a categorical stock_id with a set that lacks it is refused, not silently dropped ...
+    with pytest.raises(ValueError, match="stock_id"):
+        _model("nonlinear", feature_set="no_code")
+    # ... but a set without it is fine once the code is dropped
+    ok = _model("nonlinear", feature_set="no_code", stock_id="drop")
+    assert ok.fit_predict_fold(f, FIT, JUNE).artifact.feature_names() == [
+        "Weekday",
+        "Returns_1h_mean",
+    ]
+    with pytest.raises(ValueError, match=r"nope.*known"):
+        _model("nonlinear", feature_set="nope")
+
+
+def test_a_feature_set_is_refused_before_any_data_is_loaded(learned_data, tmp_path, monkeypatch):
+    def no_loading(*args, **kwargs):
+        raise AssertionError("the data was loaded before the model was checked")
+
+    monkeypatch.setattr("ml4trading.train.load_frames", no_loading)
+    with pytest.raises(ValueError, match="nope"):
+        train("nonlinear", tmp_path / "run", learned_data, overrides={"model.feature_set": "nope"})
+
+
+def test_stock_id_and_feature_set_can_be_searched(learned_data, tmp_path, monkeypatch):
+    _feature_sets(monkeypatch, tmp_path, small="stock_id\nReturns_1h_mean\nWeekday\n")
+    grid = {"model.stock_id": ["categorical", "drop"], "model.feature_set": ["all", "small"]}
+    out = tmp_path / "run"
+    run = train("nonlinear", out, learned_data, grid=grid, overrides=SHORT_FOLDS)
+    fold = json.loads((run / "folds" / "F2021-07" / "fold.json").read_text())
+    assert len(fold["candidate_val_r2"]) == 4  # every pair of the two lists
+    assert backtest(run, learned_data)["n_periods"] > 0
+
+
+def test_default_categorical_parameters_change_nothing(frames, monkeypatch):
+    import lightgbm as lgb
+
+    real_dataset, real_train = lgb.Dataset, lgb.train
+    seen = {}
+
+    def spy_dataset(data, *args, **kwargs):
+        seen["data"], seen["dataset_kwargs"] = data, kwargs
+        return real_dataset(data, *args, **kwargs)
+
+    def spy_train(params, train_set, *args, **kwargs):
+        seen["params"], seen["train_kwargs"] = dict(params), kwargs
+        return real_train(params, train_set, *args, **kwargs)
+
+    monkeypatch.setattr(lgb, "Dataset", spy_dataset)
+    monkeypatch.setattr(lgb, "train", spy_train)
+    f = frames["nonlinear"]
+    result = _model("nonlinear").fit_predict_fold(f, FIT, JUNE)
+
+    before = {  # the parameters of a default fit before the categorical ones existed
+        "objective": "regression_l1",
+        "num_leaves": 31,
+        "min_data_in_leaf": 20,
+        "learning_rate": 0.1,
+        "feature_fraction": 1.0,
+        "bagging_fraction": 1.0,
+        "bagging_freq": 0,
+        "lambda_l1": 0.0,
+        "lambda_l2": 0.0,
+        "max_depth": -1,
+        "min_gain_to_split": 0.0,
+        "min_sum_hessian_in_leaf": 0.001,
+        "max_bin": 255,
+        "seed": 0,
+        "deterministic": True,
+        "force_row_wise": True,
+        "num_threads": 8,
+        "verbosity": -1,
+    }
+    categorical = {  # LightGBM 4's own defaults of its four categorical-split parameters
+        "cat_smooth": 10.0,
+        "min_data_per_group": 100,
+        "max_cat_threshold": 32,
+        "cat_l2": 10.0,
+    }
+    assert seen["params"] == {**before, **categorical}
+    assert seen["dataset_kwargs"]["categorical_feature"] == ["stock_id"]
+    assert seen["train_kwargs"] == {"num_boost_round": 100}
+
+    # the same fit without those four keys (LightGBM fills in the same values) predicts the same
+    data = seen["data"]
+    plain = real_train(
+        before,
+        real_dataset(data, label=seen["dataset_kwargs"]["label"], categorical_feature=["stock_id"]),
+        num_boost_round=100,
+    )
+    X = _keyed(f, JUNE)
+    assert np.array_equal(
+        plain.predict(X[plain.feature_name()], num_threads=8), result.artifact.predict(X)
+    )
+    assert plain.model_to_string() == result.artifact.booster.model_to_string()

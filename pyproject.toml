@@ -30,6 +30,9 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["ml4trading*"]
 
+[tool.setuptools.package-data]
+"ml4trading.features" = ["feature_sets/*.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

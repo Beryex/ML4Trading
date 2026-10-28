@@ -152,6 +152,8 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             "loss": "l1",  # ML4Investment's TRAIN_OBJECTIVE, regression_l1
             "label": "raw",  # the realized return as it is; the variants: models.learned.labels
             "feature_transform": "none",  # the features as they are; "cs_rank": ranked per period
+            "stock_id": "categorical",  # the stock code as a categorical feature; "drop": unused
+            "feature_set": "all",  # every column; or a name in ml4trading/features/feature_sets/
             "num_leaves": 31,
             "min_data_in_leaf": 20,
             "learning_rate": 0.1,
@@ -165,6 +167,12 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             "min_gain_to_split": 0.0,
             "min_sum_hessian_in_leaf": 0.001,
             "max_bin": 255,
+            # categorical splits on stock_id: LightGBM 4's defaults (Parameters, "Learning
+            # Control Parameters": cat_smooth, min_data_per_group, max_cat_threshold, cat_l2)
+            "cat_smooth": 10.0,
+            "min_data_per_group": 100,
+            "max_cat_threshold": 32,
+            "cat_l2": 10.0,
         },
     },
 }

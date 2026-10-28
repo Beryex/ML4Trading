@@ -5,11 +5,18 @@ LightGBM splits on missing values itself, so the features go in as they are, unl
 period, by its cross-sectional rank (Gu, Kelly & Xiu 2020, "Empirical Asset Pricing via Machine
 Learning": ranked within each month to [-1, 1]), so a fit sees where a stock stands among the
 others of the day, not the level of a feature that drifts with the market. It is a frame
-parameter: the frames are built once per run, with the ranks in. A fit reproduces
-exactly only with ``deterministic`` and ``force_row_wise`` (ML4Investment's fixed training
-configuration) and the same thread count, which is therefore fixed here, not read from the
-machine. LightGBM is imported only when a booster is trained or loaded: it needs an OpenMP
-runtime (on macOS, ``brew install libomp``) that the other methods do not.
+parameter: the frames are built once per run, with the ranks in.
+
+Which columns a fit reads is a fit-time choice, so a grid may search it: ``feature_set`` names a
+subset of the features (``ml4trading/features/feature_sets/``; ``all`` is every column), and
+``stock_id`` is ``categorical`` (the code is a LightGBM categorical feature, split on as
+``cat_smooth``, ``min_data_per_group``, ``max_cat_threshold`` and ``cat_l2`` say) or ``drop``
+(the code is left out).
+
+A fit reproduces exactly only with ``deterministic`` and ``force_row_wise`` (ML4Investment's
+fixed training configuration) and the same thread count, which is therefore fixed here, not read
+from the machine. LightGBM is imported only when a booster is trained or loaded: it needs an
+OpenMP runtime (on macOS, ``brew install libomp``) that the other methods do not.
 """
 
 from __future__ import annotations
@@ -20,7 +27,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from ml4trading.features import CALENDAR, FEATURE_ETFS
+from ml4trading.features import CALENDAR, FEATURE_ETFS, load_feature_set
 from ml4trading.models.learned.base import FitArtifact, LearnedModel
 from ml4trading.models.learned.labels import LABELS
 from ml4trading.models.learned.losses import LOSSES
@@ -33,6 +40,8 @@ NUM_THREADS = 8
 CATEGORICAL = "stock_id"
 #: ``cs_rank``: the per-period rank in [-1, 1] of Gu, Kelly & Xiu (2020); ``none``: as built.
 FEATURE_TRANSFORMS = ("none", "cs_rank")
+#: ``categorical``: ``stock_id`` is a LightGBM categorical feature; ``drop``: it is not used.
+STOCK_ID_MODES = ("categorical", "drop")
 
 #: LightGBM's own parameter names, passed to it as they are.
 BOOSTING_PARAMS = (
@@ -48,6 +57,12 @@ BOOSTING_PARAMS = (
     "min_gain_to_split",
     "min_sum_hessian_in_leaf",
     "max_bin",
+    # how a categorical feature (``stock_id``) is split on; LightGBM 4's defaults, see
+    # config.METHOD_DEFAULTS
+    "cat_smooth",
+    "min_data_per_group",
+    "max_cat_threshold",
+    "cat_l2",
 )
 OBJECTIVES = {"mse": "regression", "l1": "regression_l1"}
 
@@ -135,7 +150,15 @@ class LGBMArtifact(FitArtifact):
 
 @register_model("nonlinear")
 class NonlinearModel(LearnedModel):
-    PARAMS = ("loss", "label", "feature_transform", "n_estimators", *BOOSTING_PARAMS)
+    PARAMS = (
+        "loss",
+        "label",
+        "feature_transform",
+        "stock_id",
+        "feature_set",
+        "n_estimators",
+        *BOOSTING_PARAMS,
+    )
     #: The features are built once per run, with ``feature_transform`` applied.
     FRAME_PARAMS = ("hold_overnight", "feature_transform")
 
@@ -149,6 +172,22 @@ class NonlinearModel(LearnedModel):
             raise ValueError(
                 f"nonlinear: unknown feature_transform {params['feature_transform']!r}; "
                 f"known: {FEATURE_TRANSFORMS}"
+            )
+        if params["stock_id"] not in STOCK_ID_MODES:
+            raise ValueError(
+                f"nonlinear: unknown stock_id {params['stock_id']!r}; known: {STOCK_ID_MODES}"
+            )
+        # read here, once: a misspelt set, or one that cannot serve a categorical stock_id, is
+        # refused before any data is loaded, and every fold of the run reads the same columns
+        self._feature_set = load_feature_set(params["feature_set"])
+        if (
+            params["stock_id"] == "categorical"
+            and self._feature_set is not None
+            and CATEGORICAL not in self._feature_set
+        ):
+            raise ValueError(
+                f"nonlinear: feature set {params['feature_set']!r} lacks {CATEGORICAL!r}, which "
+                f"stock_id='categorical' needs; add it to the set or use stock_id='drop'"
             )
 
     @property
@@ -164,6 +203,20 @@ class NonlinearModel(LearnedModel):
             return cs_rank_features(X, panel["period"].to_numpy())
         return X
 
+    def _fit_columns(self, available: pd.Index) -> list[str]:
+        """The columns a fit trains on, in order: the feature set's (every column for ``all``),
+        less ``stock_id`` under ``stock_id='drop'``. A set column the features lack is an error."""
+        columns = list(available) if self._feature_set is None else self._feature_set
+        absent = [c for c in columns if c not in available]
+        if absent:
+            raise ValueError(
+                f"nonlinear: feature set {self.params['feature_set']!r} names column(s) the "
+                f"features do not have: {absent}"
+            )
+        if self.params["stock_id"] == "drop":
+            columns = [c for c in columns if c != CATEGORICAL]
+        return columns
+
     def _fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray) -> LGBMArtifact:
         import lightgbm as lgb
 
@@ -176,6 +229,10 @@ class NonlinearModel(LearnedModel):
             "num_threads": NUM_THREADS,
             "verbosity": -1,
         }
-        data = lgb.Dataset(X_fit, label=y_fit, categorical_feature=[CATEGORICAL])
+        columns = self._fit_columns(X_fit.columns)
+        if columns != list(X_fit.columns):  # the default fit hands LightGBM the frame itself
+            X_fit = X_fit[columns]
+        categorical = [CATEGORICAL] if CATEGORICAL in columns else []
+        data = lgb.Dataset(X_fit, label=y_fit, categorical_feature=categorical)
         booster = lgb.train(params, data, num_boost_round=int(self.params["n_estimators"]))
         return LGBMArtifact(booster)
