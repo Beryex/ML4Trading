@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -42,6 +44,20 @@ def test_horizon_one_is_the_panel_label():
         pd.testing.assert_series_equal(pd.Series(exits), want, check_names=False)
     y_h[0] = 99.0  # a copy: the panel is not edited through it
     assert panel.loc[0, "y"] == 0.011
+
+
+def test_no_function_raises_a_warning():
+    # a NaT without a time unit is deprecated in NumPy; the repo's runs hide warnings, so the
+    # test turns them into errors itself
+    days = {"B": ["2021-03-01", "2021-03-02", "2021-03-04", "2021-03-05"]}
+    panel = _panel({"A": [0.01, 0.02, np.nan, 0.03], "B": [0.01, 0.02, 0.03, 0.04]}, days)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for scale in HORIZON_SCALES:
+            for h in (1, 2, 9):
+                _, exits = horizon_labels(panel, h, scale)
+                realized_by(panel, exits, pd.Timestamp("2021-03-02"))
+                window_labels(panel, list(panel["period"].iloc[:2]), h, scale, None)
 
 
 def test_sum_and_mean():

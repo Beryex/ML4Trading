@@ -66,7 +66,9 @@ def horizon_labels(panel: pd.DataFrame, h: int, scale: str) -> tuple[np.ndarray,
     sessions = panel["session"].to_numpy()
     n = len(panel)
     codes = _symbol_codes(panel)
-    exit_session = np.full(n, np.datetime64("NaT"), dtype=sessions.dtype)
+    # NumPy deprecates a NaT without a time unit, so the missing value takes the sessions' own
+    missing = np.datetime64("NaT", np.datetime_data(sessions.dtype)[0])
+    exit_session = np.full(n, missing, dtype=sessions.dtype)
     if h < n:
         reached = codes[h:] == codes[:-h]  # the symbol's rows are contiguous: t+h is its own
         exit_session[: n - h][reached] = sessions[h:][reached]
