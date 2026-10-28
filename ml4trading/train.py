@@ -21,9 +21,9 @@ boundary B (calendar: ``ml4trading.folds``):
    candidate's validation book, ``ml4trading.diagnostics``), universe.json, predictions.parquet,
    val/predictions.parquet (the chosen candidate's scored validation rows, kept from the
    validation pass, never refitted), val/daily.parquet (that candidate's validation book valued
-   once per session: ``session``, ``ret``, ``gross_ret``, so variants' daily returns can be
-   correlated and blended) and, for a model that fits one, the fitted estimator under model/.
-   With ``--importance`` that same validation fit is also scored for feature importance
+   once per session: ``session``, ``ret``, ``gross_ret``; ``ret`` is the series behind
+   ``val_diagnostics["net_sharpe"]``) and, for a model that fits one, the fitted estimator under
+   model/. With ``--importance`` that same validation fit is also scored for feature importance
    (``ml4trading.importance``) on those rows: val/importance.parquet, one row per feature. A
    fold's val/ and model/ directories are emptied before they are written, so a re-run into the
    same ``--out`` leaves no file of an earlier run.
