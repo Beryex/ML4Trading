@@ -220,6 +220,12 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             "min_data_per_group": 100,
             "max_cat_threshold": 32,
             "cat_l2": 10.0,
+            # piece-wise linear trees: off, and the ridge penalty on a leaf's coefficients;
+            # LightGBM 4's defaults (Parameters, "Learning Control Parameters": linear_tree,
+            # linear_lambda; method: Shi, Li & Li 2019, "Gradient Boosting With Piece-Wise Linear
+            # Regression Trees", IJCAI). Needs loss "mse"
+            "linear_tree": False,
+            "linear_lambda": 0.0,
         },
     },
 }

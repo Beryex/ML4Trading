@@ -11,7 +11,10 @@ Which columns a fit reads is a fit-time choice, so a grid may search it: ``featu
 subset of the features (``ml4trading/features/feature_sets/``; ``all`` is every column), and
 ``stock_id`` is ``categorical`` (the code is a LightGBM categorical feature, split on as
 ``cat_smooth``, ``min_data_per_group``, ``max_cat_threshold`` and ``cat_l2`` say) or ``drop``
-(the code is left out).
+(the code is left out). With ``linear_tree`` each leaf of a tree holds a linear model on the
+features its path splits on (Shi, Li & Li 2019, "Gradient Boosting With Piece-Wise Linear
+Regression Trees"; ridge-penalised by ``linear_lambda``); a row that lacks one of those
+features gets the leaf's constant output instead. LightGBM fits it on ``mse`` only.
 
 A fit reproduces exactly only with ``deterministic`` and ``force_row_wise`` (ML4Investment's
 fixed training configuration) and the same thread count, which is therefore fixed here, not read
@@ -63,6 +66,10 @@ BOOSTING_PARAMS = (
     "min_data_per_group",
     "max_cat_threshold",
     "cat_l2",
+    # piece-wise linear trees (Shi, Li & Li 2019): a linear model in each leaf, ridge-penalised
+    # by ``linear_lambda``; LightGBM 4's defaults, see config.METHOD_DEFAULTS
+    "linear_tree",
+    "linear_lambda",
 )
 OBJECTIVES = {"mse": "regression", "l1": "regression_l1"}
 
@@ -191,6 +198,15 @@ class NonlinearModel(LearnedModel):
         if params["stock_id"] not in STOCK_ID_MODES:
             raise ValueError(
                 f"nonlinear: unknown stock_id {params['stock_id']!r}; known: {STOCK_ID_MODES}"
+            )
+        if not isinstance(params["linear_tree"], bool):
+            raise ValueError(
+                f"nonlinear: linear_tree must be true or false, got {params['linear_tree']!r}"
+            )
+        if params["linear_tree"] and params["loss"] == "l1":
+            raise ValueError(
+                "nonlinear: linear_tree cannot be fitted on loss='l1' (LightGBM refuses "
+                "regression_l1 with linear trees); use loss='mse'"
             )
         # read here, once: a misspelt set, or one that cannot serve a categorical stock_id, is
         # refused before any data is loaded, and every fold of the run reads the same columns

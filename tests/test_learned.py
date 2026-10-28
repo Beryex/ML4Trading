@@ -877,7 +877,7 @@ def test_linear_feature_set_can_be_searched(learned_data, tmp_path, monkeypatch)
     assert backtest(run, learned_data)["n_periods"] > 0
 
 
-def test_default_categorical_parameters_change_nothing(frames, monkeypatch):
+def test_default_added_parameters_change_nothing(frames, monkeypatch):
     import lightgbm as lgb
 
     real_dataset, real_train = lgb.Dataset, lgb.train
@@ -896,7 +896,7 @@ def test_default_categorical_parameters_change_nothing(frames, monkeypatch):
     f = frames["nonlinear"]
     result = _model("nonlinear").fit_predict_fold(f, FIT, JUNE)
 
-    before = {  # the parameters of a default fit before the categorical ones existed
+    before = {  # the parameters of a default fit before the added ones existed
         "objective": "regression_l1",
         "num_leaves": 31,
         "min_data_in_leaf": 20,
@@ -922,11 +922,12 @@ def test_default_categorical_parameters_change_nothing(frames, monkeypatch):
         "max_cat_threshold": 32,
         "cat_l2": 10.0,
     }
-    assert seen["params"] == {**before, **categorical}
+    piece_wise_linear = {"linear_tree": False, "linear_lambda": 0.0}  # LightGBM 4's defaults
+    assert seen["params"] == {**before, **categorical, **piece_wise_linear}
     assert seen["dataset_kwargs"]["categorical_feature"] == ["stock_id"]
     assert seen["train_kwargs"] == {"num_boost_round": 100}
 
-    # the same fit without those four keys (LightGBM fills in the same values) predicts the same
+    # the same fit without those six keys (LightGBM fills in the same values) predicts the same
     data = seen["data"]
     plain = real_train(
         before,
@@ -1143,6 +1144,122 @@ def test_a_saved_early_stopped_fit_predicts_the_same(
     artifact.save(tmp_path / "model")
     loaded = type(artifact).load(tmp_path / "model")
     assert loaded.booster.num_trees() == best  # the file keeps the best rounds' trees only
+    assert np.array_equal(loaded.predict(X), artifact.predict(X))
+
+
+# ---- piece-wise linear trees (LightGBM's linear_tree, linear_lambda) ----
+
+LINEAR_TREES = {"linear_tree": True, "loss": "mse", "num_leaves": 2, "n_estimators": 20}
+
+
+def test_linear_trees_fit_a_linear_signal(frames):
+    f = frames["nonlinear"]
+    column, slope = "Volatility_5d", 0.5
+    panel = f.panel.assign(y=slope * f.X[column].to_numpy())  # the label is linear in a feature
+    signal = Frames(panel, f.X)
+    X = _keyed(signal, JUNE)
+    truth = slope * X[column].to_numpy()
+    known = np.isfinite(truth)
+    assert known.any()
+
+    def rmse(**params):
+        artifact = (
+            _model("nonlinear", **{**LINEAR_TREES, **params})
+            .fit_predict_fold(signal, FIT, JUNE)
+            .artifact
+        )
+        predicted = artifact.predict(X)
+        assert np.isfinite(predicted).all()
+        return artifact.booster, np.sqrt(np.mean((predicted - truth)[known] ** 2))
+
+    booster, linear = rmse()
+    text = booster.model_to_string()
+    assert "[linear_tree: 1]" in text and "is_linear=1" in text
+    constant_booster, constant = rmse(linear_tree=False)
+    assert "[linear_tree: 0]" in constant_booster.model_to_string()
+    assert "is_linear=1" not in constant_booster.model_to_string()
+    # two leaves per tree, 20 trees: a line per leaf follows the signal, a step per leaf cannot
+    assert linear < constant / 2
+
+
+def test_linear_lambda_reaches_lightgbm(frames):
+    text = (
+        _model("nonlinear", **LINEAR_TREES, linear_lambda=0.25)
+        .fit_predict_fold(frames["nonlinear"], FIT, JUNE)
+        .artifact.booster.model_to_string()
+    )
+    assert "[linear_lambda: 0.25]" in text
+
+
+def test_linear_tree_with_l1_is_refused_before_loading(learned_data, tmp_path, monkeypatch):
+    def no_loading(*args, **kwargs):
+        raise AssertionError("the data was loaded before the model was checked")
+
+    monkeypatch.setattr("ml4trading.train.load_frames", no_loading)
+    # the default loss is l1, which LightGBM cannot fit linear trees on
+    with pytest.raises(ValueError, match="linear_tree.*l1"):
+        _model("nonlinear", linear_tree=True)
+    with pytest.raises(ValueError, match="linear_tree.*l1"):
+        train("nonlinear", tmp_path / "run", learned_data, overrides={"model.linear_tree": True})
+    # one candidate of a grid is enough
+    with pytest.raises(ValueError, match="linear_tree.*l1"):
+        train(
+            "nonlinear", tmp_path / "run", learned_data, grid={"model.linear_tree": [False, True]}
+        )
+    # either alone is fine
+    _model("nonlinear", linear_tree=True, loss="mse")
+    _model("nonlinear", linear_tree=False, loss="l1")
+    with pytest.raises(ValueError, match="linear_tree.*true or false"):
+        _model("nonlinear", linear_tree="false", loss="mse")  # a string is truthy
+
+
+def test_linear_tree_is_a_nonlinear_parameter_only():
+    for name in ("linear_tree", "linear_lambda"):
+        with pytest.raises(ValueError, match=f"unknown parameter.*{name}"):
+            _model("linear", **{name: 0})
+
+
+def test_nan_features_with_linear_trees(frames):
+    f = frames["nonlinear"]
+    # The natural NaNs are the rolling features' warm-up rows, which the fit window holds. Make
+    # the frame harder: a third of every feature's values missing, and one feature missing
+    # throughout. LightGBM predicts the leaf's constant output for a row that lacks a feature its
+    # leaf's line uses, so such a row still gets a finite prediction.
+    holes = np.random.default_rng(0).random(f.X.shape) < 0.3
+    holes[:, list(f.X.columns).index("stock_id")] = False
+    X = f.X.mask(holes)
+    X["Return_20d"] = np.nan
+    holed = Frames(f.panel, X)
+    assert X.isna().any(axis=1).all()  # every row lacks something
+    artifact = _model("nonlinear", **LINEAR_TREES).fit_predict_fold(holed, FIT, JUNE).artifact
+    assert "is_linear=1" in artifact.booster.model_to_string()
+    for frame in (holed, f):  # rows with missing features, then rows without
+        june = _keyed(frame, JUNE)
+        assert len(june) > 0 and np.isfinite(artifact.predict(june)).all()
+    assert _keyed(f, JUNE).notna().all().all()  # the second set has none missing
+    # the natural-NaN frame fits and predicts too, on its warm-up rows included
+    natural = _model("nonlinear", **LINEAR_TREES).fit_predict_fold(f, FIT, JUNE)
+    assert f.X.loc[rows_in(f.panel, FIT).index].isna().any(axis=1).any()
+    assert len(natural.predictions) > 0 and np.isfinite(natural.predictions["prediction"]).all()
+
+
+@pytest.mark.parametrize("early_stopping", [False, True])
+def test_a_saved_linear_tree_fit_predicts_the_same(frames, tmp_path, early_stopping):
+    f = frames["nonlinear"]
+    stop = EarlyStop(_periods_of(f, JUNE), POOL, 50, 5) if early_stopping else None
+    artifact = (
+        _model("nonlinear", **{**LINEAR_TREES, "linear_lambda": 0.1})
+        .fit_predict_fold(f, FIT, JUNE, early_stop=stop)
+        .artifact
+    )
+    # the early-stopping evaluation set is a second Dataset, built from the first's parameters
+    assert (artifact.best_iteration is not None) == early_stopping
+    assert "[linear_tree: 1]" in artifact.booster.model_to_string()
+    X = _keyed(f, JUNE)
+    artifact.save(tmp_path / "model")
+    loaded = type(artifact).load(tmp_path / "model")
+    assert "[linear_tree: 1]" in loaded.booster.model_to_string()
+    assert loaded.feature_names() == artifact.feature_names()
     assert np.array_equal(loaded.predict(X), artifact.predict(X))
 
 
