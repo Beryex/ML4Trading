@@ -227,7 +227,8 @@ def _summary(run_dir: Path, method: str, folds: pd.DataFrame, importance) -> str
     ]
     for measure, heading in SUMMARY_RANKINGS:
         rank = f"{measure}_mean_rank"
-        if importance is None or rank not in importance:
+        # a measure no fold defines (``shap`` of linear trees) has no ranking to list
+        if importance is None or rank not in importance or importance[rank].isna().all():
             continue
         top = importance.dropna(subset=[rank]).sort_values([rank, "feature"]).head(TOP_N)
         lines += [

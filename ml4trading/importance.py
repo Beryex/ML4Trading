@@ -6,7 +6,8 @@ Two kinds of measure, which answer different questions:
   count and TreeSHAP contribution) says what the trees use; it is read off the fit and says
   nothing about whether using it paid out of sample. A booster fitted from a linear initial score
   (``HybridArtifact``) reports its trees' alone, and nothing for a column only its linear part
-  reads.
+  reads. LightGBM computes no TreeSHAP for linear trees (``linear_tree``), so such a booster's
+  ``shap`` is NaN for every feature; its ``gain`` and ``split`` are reported as usual.
 * ``permutation_importance`` shuffles one feature column at a time over the validation rows
   (Breiman 2001) and measures how much worse the fit's predictions get, so it works for any
   fit, and on rows the fit was not trained on (under HPO they also chose its stopping round and

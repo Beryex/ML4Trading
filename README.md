@@ -204,7 +204,8 @@ universe decides what is traded.
     `linear_lambda` (Shi, Li & Li 2019, "Gradient Boosting With Piece-Wise Linear Regression
     Trees", IJCAI; LightGBM's `linear_tree`, at its defaults). LightGBM fits it on `mse` only, so
     `loss=l1` with it is refused. A row missing a feature its leaf uses gets the leaf's constant
-    output.
+    output. LightGBM computes no TreeSHAP for linear trees, so under `--importance` their `shap`
+    column is empty; `gain` and `split` are as usual.
   - `extra_trees` (false), `path_smooth` (0.0) and `feature_fraction_bynode` (1.0): LightGBM's
     noise-robust split options, at its defaults ([Parameters](https://lightgbm.readthedocs.io/en/stable/Parameters.html),
     "Learning Control Parameters"). With `extra_trees=true` each node checks one randomly drawn
@@ -240,9 +241,10 @@ universe decides what is traded.
     plus the trees' (LightGBM's own prediction is the trees' alone); the volatility scaling, the
     smoothing and the R² read that sum. A fold's `model/` holds the booster's `model.txt` and
     the net's `init/model.npz`. Under `--importance` the `gain`, `split` and `shap` columns
-    describe the trees only, and are empty for a column only the net reads; the permutation
-    measures cover both parts. `linear_tree` may go with it; a `monotone_constraints` sign may
-    not (it would bind the trees, not the net), and is refused at construction.
+    describe the trees only, and are empty for a column only the net reads (`shap` is empty
+    throughout with `linear_tree`); the permutation measures cover both parts. `linear_tree` may
+    go with it; a `monotone_constraints` sign may not (it would bind the trees, not the net), and
+    is refused at construction.
   - `loss` (`l1` default, ML4Investment's `TRAIN_OBJECTIVE`; or `mse`), `n_estimators` (100) and
     LightGBM's `num_leaves`, `min_data_in_leaf`, `learning_rate`, `feature_fraction`,
     `bagging_fraction`, `bagging_freq`, `lambda_l1`, `lambda_l2`, `max_depth`,
@@ -339,7 +341,8 @@ what the chosen candidate's validation pass produced (nothing is refitted):
   the IC of a constant forecast, is `null`;
 - `val/importance.parquet`, with `--importance`, for a model with an estimator: one row per
   feature. The `nonlinear` fit adds its own account (LightGBM `gain`, `split` count and TreeSHAP
-  `shap`); every fit gets permutation importance on the validation rows (Breiman 2001):
+  `shap`, which is empty for linear trees: LightGBM computes none for them); every fit gets
+  permutation importance on the validation rows (Breiman 2001):
   `perm_mse`, the rise in squared error, and `perm_ic`, the fall in the mean per-period IC, when
   one feature's column is shuffled. A correlated twin can make a feature look unimportant, so
   read these as the cost of losing a column's values, not as causes.

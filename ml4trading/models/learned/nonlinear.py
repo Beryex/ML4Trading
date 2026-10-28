@@ -183,16 +183,23 @@ class LGBMArtifact(FitArtifact):
         and ``split`` (the total loss reduction and the number of splits on it, over all trees)
         and ``shap``, the mean absolute TreeSHAP contribution to ``X``'s rows (Lundberg & Lee
         2017). LightGBM appends the expected value as the last contribution column; it belongs
-        to no feature and is dropped."""
+        to no feature and is dropped. LightGBM computes no TreeSHAP for linear trees
+        (``linear_tree``; it raises), so for those ``shap`` is NaN; ``gain`` and ``split`` are
+        still the booster's own."""
         names = self.feature_names()
-        contrib = np.asarray(
-            self.booster.predict(X[names], pred_contrib=True, num_threads=NUM_THREADS), dtype=float
-        )
+        if self.booster.params.get("linear_tree", False):  # a loaded booster reads it from file
+            shap = np.full(len(names), np.nan)
+        else:
+            contrib = np.asarray(
+                self.booster.predict(X[names], pred_contrib=True, num_threads=NUM_THREADS),
+                dtype=float,
+            )
+            shap = np.abs(contrib[:, :-1]).mean(axis=0)
         return pd.DataFrame(
             {
                 "gain": self.booster.feature_importance("gain"),
                 "split": self.booster.feature_importance("split"),
-                "shap": np.abs(contrib[:, :-1]).mean(axis=0),
+                "shap": shap,
             },
             index=pd.Index(names, name="feature"),
         )

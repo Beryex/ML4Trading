@@ -93,8 +93,54 @@ def test_native_importance_columns(learned_data):
     assert native["shap"].sum() > 0.0
 
 
+@pytest.mark.parametrize("init_model", ["none", "linear"])
+def test_linear_trees_report_gain_and_split_without_shap(learned_data, tmp_path, init_model):
+    # LightGBM computes no TreeSHAP for linear trees: the booster's own account keeps its gain
+    # and split count and leaves shap undefined, plain or boosted from the linear initial score
+    f = load_frames(config.resolve("nonlinear"), learned_data)[1]
+    params = {"model.linear_tree": True, "model.loss": "mse", "model.init_model": init_model}
+    cfg = config.resolve("nonlinear", params)
+    artifact = get_model("nonlinear")(**cfg.model).fit_predict_fold(f, FIT, JUNE).artifact
+    X = _keyed(f, JUNE)
+
+    native = artifact.native_importance(X)
+
+    assert list(native.index) == artifact.feature_names()
+    assert list(native.columns) == ["gain", "split", "shap"]
+    assert native["shap"].isna().all()
+    assert np.isfinite(native[["gain", "split"]]).all().all() and native["gain"].sum() > 0.0
+    # a saved booster, loaded, is still known to hold linear trees
+    artifact.save(tmp_path / "model")
+    assert_frame_equal(type(artifact).load(tmp_path / "model").native_importance(X), native)
+
+
 def _fold_dirs(run):
     return sorted((run / "folds").iterdir())
+
+
+@pytest.mark.parametrize("init_model", ["none", "linear"])
+def test_a_linear_tree_run_writes_importance_with_no_shap(learned_data, tmp_path, init_model):
+    from ml4trading.diagnose import diagnose
+
+    overrides = {
+        **SHORT_FOLDS,
+        "model.linear_tree": True,
+        "model.loss": "mse",
+        "model.init_model": init_model,
+    }
+    run = train("nonlinear", tmp_path / "run", learned_data, overrides=overrides, importance=True)
+    assert len(_fold_dirs(run)) > 0
+    for fdir in _fold_dirs(run):
+        table = pd.read_parquet(fdir / "val" / "importance.parquet")
+        assert list(table.columns) == NONLINEAR_COLUMNS
+        assert table["shap"].isna().all()
+        assert np.isfinite(table[["gain", "split", "perm_mse"]]).all().all()
+    # the run's diagnosis ranks on what the folds have, and lists no empty SHAP ranking
+    out = diagnose(run)
+    importance = pd.read_csv(out / "importance.csv")
+    assert importance["shap_mean"].isna().all() and importance["gain_mean"].notna().all()
+    summary = (out / "summary.md").read_text()
+    assert "(SHAP)" not in summary and "(permutation MSE)" in summary
 
 
 def test_train_writes_importance_only_when_asked(learned_data, tmp_path):
