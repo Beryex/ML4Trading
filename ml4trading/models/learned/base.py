@@ -100,8 +100,10 @@ class LearnedModel(Model):
         """The estimator fitted on the fold's labelled fit rows (``X_fit`` indexed by
         (period, symbol)); ``y_fit`` is their label after the model's ``label_kind``.
         ``eval_set`` is None, or the features and labels (in the same units as ``y_fit``) of the
-        evaluation rows and the ``EarlyStop`` that chose them: a model that cannot stop early
-        refuses it."""
+        evaluation rows and the ``EarlyStop`` that chose them. It is passed only when a fit asks
+        to stop early, so a model that cannot may leave the parameter out of its signature (a
+        two-argument ``_fit``, which then fails with a TypeError if asked to); one that keeps it
+        refuses a set."""
 
     def symbol_pool(self, available: list[str]) -> list[str]:
         absent = [e for e in FEATURE_ETFS if e not in set(available)]
@@ -185,7 +187,10 @@ class LearnedModel(Model):
         eval_set = (
             None if early_stop is None else self._evaluation_rows(panel, X, transform, early_stop)
         )
-        artifact = self._fit(X[fit], y_fit, eval_set)
+        # a model that cannot stop early may declare ``_fit`` without ``eval_set``
+        artifact = (
+            self._fit(X[fit], y_fit) if eval_set is None else self._fit(X[fit], y_fit, eval_set)
+        )
 
         rows = rows_in(panel, predict_window)
         at = panel.index.get_indexer(rows.index)

@@ -9,7 +9,8 @@ A transform is fitted on the fold's fit rows -- the clip bounds are quantiles of
 and then applied to other rows by the same rule: the validation scoring reads it to put the
 realized returns in the units the fit trained on. Per-period means are taken over the rows
 handed to ``apply``, so they are the cross-section of the period itself: in the fit, labels the
-fit already trains on, and in validation, labels used only to score, never to predict.
+fit already trains on, and in validation, labels used to score and to select (the stopping
+round, the parameters), never to fit.
 """
 
 from __future__ import annotations

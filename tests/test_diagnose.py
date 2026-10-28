@@ -130,7 +130,7 @@ def test_diagnose_without_importance(learned_data, tmp_path):
 def _write_run(root, folds, method="nonlinear"):
     """A run directory of hand-written folds. A fold is a dict with ``name``, ``test_start``,
     ``scores``, ``chosen``, ``diagnostics`` (the keys it sets; the rest are None) and an optional
-    ``importance`` frame."""
+    ``importance`` frame and ``hpo`` block."""
     (root / "folds").mkdir(parents=True)
     (root / "run.json").write_text(
         json.dumps({"method": method, "folds": [f["name"] for f in folds]})
@@ -146,6 +146,8 @@ def _write_run(root, folds, method="nonlinear"):
             "chosen": fold["chosen"],
             "val_diagnostics": diagnostics,
         }
+        if "hpo" in fold:
+            meta["hpo"] = fold["hpo"]
         (fdir / "fold.json").write_text(json.dumps(meta))
         if fold.get("importance") is not None:
             fold["importance"].to_parquet(fdir / "val" / "importance.parquet", index=False)
@@ -193,6 +195,32 @@ def test_headline_numbers_follow_the_files(tmp_path):
     assert "| `ic_mean` | 0.04 | 3 |" in summary
     assert "| `beta` | 0.7 | 3 |" in summary
     assert "| `r2_mse` | n/a | 0 |" in summary
+
+
+def test_an_hpo_runs_trial_counts_and_winning_rounds_are_columns(tmp_path):
+    def block(rounds, best):
+        trials = [{"number": i, "best_iteration": n} for i, n in enumerate(rounds)]
+        return {"n_trials": len(rounds), "best_number": best, "trials": trials}
+
+    searched = _write_run(
+        tmp_path / "searched",
+        [
+            {**_fold("F2021-12", "2021-12-01", 1.0), "hpo": block([40, 25, 70], 1)},
+            {**_fold("F2022-01", "2022-01-03", 2.0), "hpo": block([55], 0)},
+            # a fold with nothing to fit is not searched: no winner, no round
+            {**_fold("F2022-02", "2022-02-01", 0.0), "hpo": block([], None)},
+        ],
+    )
+
+    folds = _read(diagnose(searched) / "folds.csv")
+
+    assert list(folds.columns[-2:]) == ["hpo_n_trials", "hpo_best_iteration"]
+    assert folds["hpo_n_trials"].tolist() == [3, 1, 0]
+    assert folds["hpo_best_iteration"].iloc[:2].tolist() == [25, 55]  # trials[best_number]
+    assert np.isnan(folds["hpo_best_iteration"].iloc[2])
+
+    plain = _write_run(tmp_path / "plain", [_fold("F2021-12", "2021-12-01", 1.0)])
+    assert not [c for c in _read(diagnose(plain) / "folds.csv").columns if "hpo" in c]
 
 
 def test_an_empty_universe_fold_keeps_its_recorded_score(tmp_path):

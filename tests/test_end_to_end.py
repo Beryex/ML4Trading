@@ -60,6 +60,7 @@ def test_investment_train_then_backtest(data_dir, tmp_path):
     run = train("investment", tmp_path / "run", data_dir, overrides=SHORT_FOLDS)
     run_meta = json.loads((run / "run.json").read_text())
     assert run_meta["folds"] == [f"F2021-{m:02d}" for m in range(6, 12)]
+    assert "hpo" not in run_meta  # a baseline has no search to record
     fold = json.loads((run / "folds" / "F2021-06" / "fold.json").read_text())
     assert fold["test"] == ["2021-06-01", "2021-06-30"]
     assert json.loads((run / "folds" / "F2021-06" / "universe.json").read_text()) == ["VOO"]

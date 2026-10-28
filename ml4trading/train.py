@@ -23,14 +23,15 @@ boundary B (calendar: ``ml4trading.folds``):
    validation pass, never refitted) and, for a model that fits one, the fitted estimator under
    model/. With ``--importance`` that same validation fit is also scored for feature importance
    (``ml4trading.importance``) on those rows: val/importance.parquet, one row per feature. A
-   fold's val/ directory is emptied before it is written, so a re-run into the same ``--out``
-   leaves no file of an earlier run.
+   fold's val/ and model/ directories are emptied before they are written, so a re-run into the
+   same ``--out`` leaves no file of an earlier run.
 
 With ``--hpo-hours H`` (``nonlinear`` only, in place of a grid) step 1 is a search instead
 (``ml4trading.hpo``): the run's budget of H hours is split evenly across the folds, and each fold
 searches its parameters for that long on the validation window. The winner is the single
 candidate -- scored, kept and deployed like a grid's winner -- and fold.json gains an ``hpo``
-block with every trial.
+block with every trial. run.json gains an ``hpo`` block too -- the request (``hours``,
+``trials``) and the per-fold ``timeout_s`` it came to -- which a run without a search lacks.
 
 A model fits on every symbol of its pool; the universe only decides what is traded. The grid
 file maps dotted ``model.*`` keys to lists of values; only model parameters are searched per
@@ -291,6 +292,8 @@ def train(
     boundaries = fold_boundaries(base.folds)
     searching = hpo_hours is not None or hpo_trials is not None
     timeout = hpo_hours * 3600 / len(boundaries) if hpo_hours and boundaries else None
+    if searching:
+        run["hpo"] = {"hours": hpo_hours, "trials": hpo_trials, "timeout_s": timeout}
     t0 = time.time()
     for b in boundaries:
         fold = fold_at(b, base.folds)
@@ -343,8 +346,9 @@ def train(
         if hpo_record is not None:
             meta["hpo"] = hpo_record
         (fdir / "fold.json").write_text(json.dumps(meta, indent=2) + "\n")
-        if (fdir / "val").exists():  # nothing of an earlier run into the same --out survives
-            shutil.rmtree(fdir / "val")
+        for stale in ("val", "model"):  # nothing of an earlier run into the same --out survives
+            if (fdir / stale).exists():
+                shutil.rmtree(fdir / stale)
         (fdir / "val").mkdir()
         kept.scored.drop(columns="open_px").to_parquet(
             fdir / "val" / "predictions.parquet", index=False

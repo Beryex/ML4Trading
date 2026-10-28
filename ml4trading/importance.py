@@ -7,9 +7,13 @@ Two kinds of measure, which answer different questions:
   nothing about whether using it paid out of sample.
 * ``permutation_importance`` shuffles one feature column at a time over the validation rows
   (Breiman 2001) and measures how much worse the fit's predictions get, so it works for any
-  fit, and on rows the fit never saw. ``perm_mse`` is the rise in the mean squared error against
-  the label; ``perm_ic`` is the fall in the mean per-period information coefficient
+  fit, and on rows the fit was not trained on (under HPO they also chose its stopping round and
+  parameters). ``perm_mse`` is the rise in the mean squared error against the label; ``perm_ic``
+  is the fall in the mean per-period information coefficient
   (``ml4trading.diagnostics.period_ic``) against the realized return.
+
+``linear`` fills a missing value with its period's median, recomputed at prediction time over
+the rows it is handed: here the scored rows only, not the fit's own.
 
 A feature that is correlated with another can look unimportant, the twin carrying its signal once
 it is shuffled; read the numbers as the cost of losing a column's own values, not as a ranking of

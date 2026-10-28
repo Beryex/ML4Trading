@@ -28,9 +28,8 @@ from ml4trading.models import get_model
 from ml4trading.models.base import FoldResult, Frames
 from ml4trading.models.learned.base import EarlyStop
 
-#: The sampler's seed, hence the whole study's (ML4Investment seeds its TPESampler as well,
-#: ``_build_hyperparameter_study`` in ml4investment/utils/model_training.py). The fits' own seed
-#: is nonlinear's fixed ``seed=0``.
+#: The sampler's seed, hence the whole study's. 0 is the seed the project's fits already use
+#: (nonlinear's LightGBM ``seed=0``); no public source fixes one.
 SEED = 0
 #: Most boosting rounds a trial may train: ML4Investment's ``NUM_ROUNDS`` default
 #: (ml4investment/config/global_settings.py).
@@ -138,7 +137,9 @@ def search_fold(
         return result.eval_mse
 
     with warnings.catch_warnings():
-        # ``multivariate=True`` is flagged experimental in Optuna 4
+        # ``multivariate=True`` is flagged experimental in Optuna 4; ML4Investment samples with it
+        # too (``MODEL_OPTIMIZATION_SAMPLING_MULTIVARIATE``, default true, in
+        # ml4investment/config/global_settings.py)
         warnings.simplefilter("ignore", optuna.exceptions.ExperimentalWarning)
         study = optuna.create_study(
             direction="minimize",

@@ -15,7 +15,7 @@ from ml4trading.data import all_symbols, load_bars, load_dividends
 from ml4trading.features import CALENDAR
 from ml4trading.models import FoldResult, Frames, get_model
 from ml4trading.models.base import empty_predictions, rows_in
-from ml4trading.models.learned.base import EarlyStop
+from ml4trading.models.learned.base import EarlyStop, FitArtifact, LearnedModel
 from ml4trading.models.learned.labels import LabelTransform
 from ml4trading.models.learned.linear import impute_by_period
 from ml4trading.models.learned.losses import baseline_prediction, loss_value, oos_r2
@@ -890,6 +890,46 @@ def test_no_evaluation_row_is_refused(frames, periods, symbols):
     }[periods]
     with pytest.raises(ValueError, match="early stopping: no labelled evaluation row"):
         _model("nonlinear").fit_predict_fold(f, FIT, JUNE, EarlyStop(chosen, symbols, 50, 5))
+
+
+class _MeanArtifact(FitArtifact):
+    FILENAME = "mean.txt"
+
+    def __init__(self, mean: float, names: list[str]):
+        self.mean, self.names = mean, names
+
+    def predict(self, X):
+        return np.full(len(X), self.mean)
+
+    def feature_names(self):
+        return self.names
+
+    def save(self, directory):
+        raise NotImplementedError
+
+    @classmethod
+    def load(cls, directory):
+        raise NotImplementedError
+
+
+class _TwoArgumentModel(LearnedModel):
+    """A model written as the README's "Adding a model" has it: ``_fit`` takes two arguments."""
+
+    loss = "mse"
+
+    def _fit(self, X_fit, y_fit):
+        return _MeanArtifact(float(np.mean(y_fit)), list(X_fit.columns))
+
+
+def test_a_two_argument_fit_works_without_early_stopping(frames):
+    f = frames["linear"]
+    result = _TwoArgumentModel(hold_overnight=True).fit_predict_fold(f, FIT, JUNE)
+    assert len(result.predictions) > 0
+    assert result.predictions["prediction"].nunique() == 1
+    # only a fit asked to stop early needs the third argument
+    stop = EarlyStop(_periods_of(f, JUNE), POOL, 50, 5)
+    with pytest.raises(TypeError, match="positional argument"):
+        _TwoArgumentModel(hold_overnight=True).fit_predict_fold(f, FIT, JUNE, early_stop=stop)
 
 
 def test_linear_refuses_early_stopping(frames):

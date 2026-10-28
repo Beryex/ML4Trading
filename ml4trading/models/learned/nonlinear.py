@@ -82,7 +82,9 @@ def cs_rank_features(X: pd.DataFrame, period: np.ndarray) -> pd.DataFrame:
     1``: ``r`` is the value's average-tie rank among the period's non-NaN values and ``n`` their
     count, so the smallest maps to -1 and the largest to 1 (equal values share their average
     rank). NaN stays NaN; a period with a single value maps it to 0.0, the middle of the range,
-    and a period with none leaves the column NaN. ``period`` is row-aligned with ``X``.
+    and a period with none leaves the column NaN. The rank is taken over the rows a period has,
+    i.e. the symbols with a bar in that session: the same convention as ``linear``'s per-period
+    median imputation. ``period`` is row-aligned with ``X``.
 
     ``X`` is overwritten column by column and returned, so the working memory is a few columns
     of float64, not a second frame."""

@@ -36,7 +36,12 @@ pytest
   candidate configurations are fitted on 36 months of training data and scored on the 12
   validation months that follow; the best one is refitted on the 36 months before `B` and
   predicts month `B`. Fits stop 5 sessions before whatever they are scored on, because a label
-  looks one period ahead. The test months, concatenated, are the result.
+  looks one period ahead. The test months, concatenated, are the result. The validation window
+  ends the day before `B` and has no embargo after it, so its last period's overnight label
+  exits at the first test session's open (plus a dividend ex-dated that day). That one price
+  reaches the validation score and, under a hyperparameter search, the stopping round and the
+  chosen configuration; nothing later in the test month does, and the deploy fit, which stops
+  5 sessions before `B`, is unaffected.
 - **Frames and models** (`models/`). A run builds its method's frames once -- the labelled
   panel over the method's symbol pool and, for a learned model, its features (`features/`) row
   by row -- and every fold reaches the model only as a fit window and a predict window over them.
@@ -131,7 +136,9 @@ universe decides what is traded.
 - **Grids** (`grids/linear.yaml`, `grids/nonlinear.yaml`) are searched per fold on validation net
   Sharpe like any method's. Each fold also records every candidate's out-of-sample R², against
   the constant fitted on its training rows (`candidate_val_r2` in `fold.json`); it is never
-  ranked on. For `nonlinear`, a per-fold search can take a grid's place (see below).
+  ranked on. R² (and `r2_mse` below) is measured in each run's own label units, so it compares
+  only across runs with the same `model.label`; net Sharpe and IC compare across label
+  variants. For `nonlinear`, a per-fold search can take a grid's place (see below).
 
 ```bash
 python -m ml4trading.train --method linear --grid grids/linear.yaml --out runs/linear
@@ -160,6 +167,12 @@ python -m ml4trading.train --method nonlinear --out runs/nonlinear --hpo-hours 1
   trial (ranked on squared error, not on net Sharpe). The first trial is the run's own
   configuration (`--set model.*`, or the defaults), with a zero `lambda_l1` / `lambda_l2` raised
   to the lower bound 1e-8: every fold has a winner, and the search can only improve on it.
+- **The sampler starts at random.** Optuna's TPE sampler draws its first 10 trials at random
+  (its default `n_startup_trials`), and the enqueued baseline counts as one of them; TPE guides
+  the search only after that. A trial may run up to 1,000 rounds, so it can cost several times a
+  100-round default fit, and a fold's share of a small budget may end within the random phase.
+  Each fold's realized trial count is `fold.json["hpo"]["n_trials"]` (also a column of
+  `diagnose`'s `folds.csv`).
 - **The winner is one candidate.** Its validation predictions are scored, kept and diagnosed
   like a grid winner's, so `candidate_val_net_sharpe` and `candidate_val_r2` have one entry and
   `chosen` is 0. The deploy fit trains on the deploy window with the winner's five parameters and
@@ -170,19 +183,21 @@ python -m ml4trading.train --method nonlinear --out runs/nonlinear --hpo-hours 1
   least one fit and may overrun its share by up to one.
 - **Validation metrics are optimistic.** As for any grid winner, a fold's `val_net_sharpe`,
   `val_diagnostics` and R² for the HPO winner are measured on the window the winner was chosen
-  on (and whose squared error stopped its rounds). They say how well the search fitted that
-  window, not how the winner will do; the test months are the only out-of-sample result.
+  on (and whose squared error stopped its rounds), and the importance tables come from that same
+  window. They say how well the search fitted that window, not how the winner will do; the test
+  months are the only out-of-sample result.
 - **A time budget makes a run machine-dependent.** The study is seeded, so its sequence of
   points is fixed, but how many trials fit in a fold's share depends on the machine and its
   load. A fold that gets further can find a better point, and so a different winner, deploy fit
   and predictions. A re-run, or the same run on another machine, can therefore differ; read
   `n_trials` in each fold's record. `train(..., hpo_trials=N)` (Python only) runs N trials per
   fold instead, and that reproduces.
-- **Record.** `fold.json["hpo"]` holds `timeout_s` (the fold's share, null when only
-  `hpo_trials` was given), `n_trials`, `best_number` and `trials`: for each, its `number`,
-  `params`, `value` (validation squared error), `best_iteration` and `seconds`. A fold with
-  nothing to fit (an empty universe, or no fit window) is not searched: `n_trials` is 0 and it
-  deploys the run's own configuration.
+- **Record.** `run.json["hpo"]` holds the request -- `hours`, `trials` (null when not given) --
+  and the per-fold `timeout_s` it came to; a run without a search has no such key.
+  `fold.json["hpo"]` holds `timeout_s` (the fold's share, null when only `hpo_trials` was given),
+  `n_trials`, `best_number` and `trials`: for each, its `number`, `params`, `value` (validation
+  squared error), `best_iteration` and `seconds`. A fold with nothing to fit (an empty universe,
+  or no fit window) is not searched: `n_trials` is 0 and it deploys the run's own configuration.
 - HPO needs `--method nonlinear`, no `--grid` and a positive H; any other request is refused
   before the data is loaded.
 
@@ -216,8 +231,9 @@ python -m ml4trading.diagnose --run runs/nonlinear
 ```
 
 - `folds.csv`: one row per fold -- `val_net_sharpe` (the chosen candidate's score,
-  `candidate_val_net_sharpe[chosen]`) and every `val_diagnostics` key; `by_test_year.csv`: their
-  mean per test year, with the number of folds;
+  `candidate_val_net_sharpe[chosen]`) and every `val_diagnostics` key, then for a run with a
+  hyperparameter search `hpo_n_trials` and `hpo_best_iteration` (the round the winning trial
+  kept); `by_test_year.csv`: their mean per test year, with the number of folds;
 - `importance.csv`: per feature and measure, the mean over folds, the mean rank (1 = largest,
   ranked within each fold) and the share of folds in which it is in the top 20;
   `importance_stability.csv`: per measure, the mean Spearman correlation and top-20 overlap
@@ -233,7 +249,9 @@ python -m ml4trading.diagnose --run runs/nonlinear
    needs them, features row-aligned with it; fit on the labelled rows inside `fit_window` and
    predict the periods of `predict_window`, where a prediction for period *t* may only use what
    was known at *t*'s open. A model on the features subclasses
-   `ml4trading.models.learned.base.LearnedModel` and implements only `_fit`.
+   `ml4trading.models.learned.base.LearnedModel` and implements only `_fit(X_fit, y_fit)`. Its
+   third parameter, `eval_set`, is optional: it is passed only when a fit asks to stop early
+   (the hyperparameter search does), so a model that cannot may leave it out.
 2. Register it with `@register_model("my_model")`, import its module in
    `ml4trading/models/__init__.py`, and add its defaults to `METHOD_DEFAULTS` in
    `ml4trading/config.py` (`K`, `model.hold_overnight`, and any trader overrides).

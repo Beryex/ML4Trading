@@ -6,6 +6,7 @@ from conftest import write_dataset
 
 from ml4trading import config, hpo
 from ml4trading.backtest import backtest
+from ml4trading.diagnose import diagnose
 from ml4trading.hpo import MAX_ROUNDS, PATIENCE, SPACE, baseline_point, search_fold
 from ml4trading.models import get_model
 from ml4trading.models.base import rows_in
@@ -177,6 +178,10 @@ def _folds(run):
     ]
 
 
+def _run_meta(run):
+    return json.loads((run / "run.json").read_text())
+
+
 def test_train_with_hpo(learned_data, tmp_path, monkeypatch):
     found = []
     real = hpo.search_fold
@@ -226,6 +231,16 @@ def test_train_with_hpo(learned_data, tmp_path, monkeypatch):
         # ... which is also the fit the importance is scored on
         assert len(pd.read_parquet(fdir / "val" / "importance.parquet")) > 0
     assert backtest(run, learned_data)["n_periods"] > 0
+    # the run records the request; a fold's own count is in its fold.json
+    assert _run_meta(run)["hpo"] == {"hours": None, "trials": 3, "timeout_s": None}
+
+    # diagnose carries each fold's trial count and the winner's round into folds.csv
+    table = pd.read_csv(diagnose(run) / "folds.csv")
+    assert list(table.columns[-2:]) == ["hpo_n_trials", "hpo_best_iteration"]
+    assert table["hpo_n_trials"].tolist() == [3, 3, 3]
+    assert table["hpo_best_iteration"].tolist() == [
+        fold["hpo"]["trials"][fold["hpo"]["best_number"]]["best_iteration"] for fold, _ in folds
+    ]
 
 
 def test_the_budget_is_split_evenly(learned_data, tmp_path, monkeypatch):
@@ -243,6 +258,18 @@ def test_the_budget_is_split_evenly(learned_data, tmp_path, monkeypatch):
     for fold, _ in _folds(run):
         assert fold["hpo"]["timeout_s"] == pytest.approx(3.6)
         assert fold["hpo"]["n_trials"] == 1
+    assert _run_meta(run)["hpo"] == {
+        "hours": 0.003,
+        "trials": None,
+        "timeout_s": pytest.approx(3.6),
+    }
+
+
+def test_a_run_without_a_search_records_none(learned_data, tmp_path):
+    run = train("linear", tmp_path / "run", learned_data, overrides=SHORT_FOLDS)
+    assert "hpo" not in _run_meta(run)
+    assert all("hpo" not in fold for fold, _ in _folds(run))
+    assert not [c for c in pd.read_csv(diagnose(run) / "folds.csv").columns if "hpo" in c]
 
 
 def test_hpo_refusals(learned_data, tmp_path, monkeypatch):
@@ -253,6 +280,8 @@ def test_hpo_refusals(learned_data, tmp_path, monkeypatch):
     out = tmp_path / "run"
     with pytest.raises(ValueError, match="grid"):
         train("nonlinear", out, learned_data, grid={"model.num_leaves": [7]}, hpo_trials=2)
+    with pytest.raises(ValueError, match="grid"):  # the CLI's --hpo-hours with --grid
+        train("nonlinear", out, learned_data, grid={"model.num_leaves": [7]}, hpo_hours=1.0)
     with pytest.raises(ValueError, match="nonlinear"):
         train("linear", out, learned_data, hpo_trials=2)
     with pytest.raises(ValueError, match="hpo_hours"):
@@ -301,6 +330,27 @@ def test_a_rerun_clears_the_old_validation_outputs(learned_data, tmp_path):
     plain = train("nonlinear", out, learned_data, overrides=SHORT_FOLDS)
     for _, fdir in _folds(plain):
         assert sorted(p.name for p in (fdir / "val").iterdir()) == ["predictions.parquet"]
+
+
+def test_a_rerun_clears_the_old_fitted_model(learned_data, tmp_path):
+    out = tmp_path / "run"
+    first = train("linear", out, learned_data, overrides=SHORT_FOLDS)
+    assert all(
+        sorted(p.name for p in (d / "model").iterdir()) == ["model.npz"] for _, d in _folds(first)
+    )
+    # a different estimator into the same --out: nothing of the linear fit stays beside it
+    again = train("nonlinear", out, learned_data, overrides=SHORT_FOLDS)
+    for _, fdir in _folds(again):
+        assert sorted(p.name for p in (fdir / "model").iterdir()) == ["model.txt"]
+    # a fold that now fits nothing (nobody is liquid enough) has no model at all
+    empty = train(
+        "nonlinear",
+        out,
+        learned_data,
+        overrides={**SHORT_FOLDS, "selector.min_dollar_volume": 1e12},
+    )
+    for _, fdir in _folds(empty):
+        assert not (fdir / "model").exists()
 
 
 def test_the_first_of_equal_candidates_is_chosen(learned_data, tmp_path):

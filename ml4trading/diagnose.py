@@ -16,7 +16,10 @@ Writes ``<run>/diagnose/``:
 * ``folds.csv``: one row per fold -- ``fold``, ``test_year`` (the year its test month falls in),
   ``val_net_sharpe`` (the chosen candidate's score, ``candidate_val_net_sharpe[chosen]``; 0.0 for a
   fold whose universe is empty, which has no ``val_diagnostics.net_sharpe``) -- then every
-  ``val_diagnostics`` key.
+  ``val_diagnostics`` key. For a run with a search (``fold.json`` has an ``hpo`` block), two more
+  columns follow: ``hpo_n_trials`` (the trials the fold's search completed) and
+  ``hpo_best_iteration`` (the round the winning trial kept, ``trials[best_number]``; empty for a
+  fold that was not searched). A run without a search has neither column.
 * ``by_test_year.csv``: the mean of each of those columns over the folds of a test year, and
   ``n_folds``.
 * ``importance.csv`` and ``importance_stability.csv``, when any fold wrote an importance table
@@ -77,9 +80,23 @@ SUMMARY_METRICS = [
 SUMMARY_RANKINGS = [("shap", "SHAP"), ("perm_mse", "permutation MSE")]
 
 
+def _hpo_columns(hpo: dict | None) -> dict:
+    """A fold's search as columns: its trial count and the round its winner kept (None for a
+    fold that was not searched, which has no winner). Nothing for a fold without a search."""
+    if hpo is None:
+        return {}
+    best = hpo["best_number"]
+    rounds = {t["number"]: t["best_iteration"] for t in hpo["trials"]}
+    return {
+        "hpo_n_trials": hpo["n_trials"],
+        "hpo_best_iteration": None if best is None else rounds[best],
+    }
+
+
 def _read_folds(run_dir: Path, names: list[str]) -> pd.DataFrame:
     """One row per fold, in run order: ``fold, test_year, val_net_sharpe`` then every
-    ``val_diagnostics`` key, all numeric (a None becomes NaN)."""
+    ``val_diagnostics`` key and, for a fold with an ``hpo`` block, ``hpo_n_trials`` and
+    ``hpo_best_iteration``; all numeric (a None becomes NaN)."""
     rows = []
     for name in names:
         meta = json.loads((run_dir / "folds" / name / "fold.json").read_text())
@@ -91,6 +108,7 @@ def _read_folds(run_dir: Path, names: list[str]) -> pd.DataFrame:
                 "test_year": pd.Timestamp(meta["test"][0]).year,
                 "val_net_sharpe": float(meta["candidate_val_net_sharpe"][meta["chosen"]]),
                 **meta["val_diagnostics"],
+                **_hpo_columns(meta.get("hpo")),
             }
         )
     folds = pd.DataFrame(rows)
