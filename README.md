@@ -103,7 +103,10 @@ universe decides what is traded.
 - **`linear`**: an elastic net on the standardized features. A missing value is replaced by the
   median of its feature over the same session's stocks; the penalty is a fraction `alpha_ratio`
   of the smallest one that zeroes every coefficient (scikit-learn's `ElasticNetCV` convention).
-  The stock code is not used.
+  The stock code is not used. `--set model.feature_set=<name>` (or a list in a grid) trains on
+  the columns of a named subset instead of every one (`all`, the default); the format is in
+  `ml4trading/features/feature_sets/FORMAT.md`. A set may list `stock_id`, which is left out
+  all the same, and a column the features do not have is refused by name.
 - **`nonlinear`**: LightGBM, by default on the absolute error as in ML4Investment, with the stock
   code as a categorical feature; missing values go in as they are. Fits are deterministic (a
   fixed seed and thread count). Its `model.*` options (`--set model.label=demean`, or a list in

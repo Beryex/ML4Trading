@@ -147,6 +147,7 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             # smooth_halflife 0 (sessions; 0 = off) and extra_features False
             "smooth_halflife": 0,
             "extra_features": False,
+            "feature_set": "all",  # every column; or a name in ml4trading/features/feature_sets/
             # a convergence cap, not a model choice: scikit-learn's default 1000 stops short at the
             # grid's smallest alpha_ratio, which took 59,010 iterations (0.4 s) on a full fit slice
             # and up to 241,123 on the synthetic test data

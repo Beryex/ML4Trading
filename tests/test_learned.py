@@ -746,6 +746,92 @@ def test_stock_id_and_feature_set_can_be_searched(learned_data, tmp_path, monkey
     assert backtest(run, learned_data)["n_periods"] > 0
 
 
+def test_linear_feature_set_limits_the_columns(frames, monkeypatch, tmp_path):
+    f = frames["linear"]
+    chosen = ["Weekday", "stock_id", "Returns_1h_mean", "Volatility_5d"]
+    _feature_sets(
+        monkeypatch,
+        tmp_path,
+        tmp_test="# four columns, the stock code among them\n" + "\n".join(chosen) + "\n",
+        no_code="Weekday\nReturns_1h_mean\n",
+        only_code="stock_id\n",
+    )
+    result = _model("linear", feature_set="tmp_test").fit_predict_fold(f, FIT, JUNE)
+    artifact = result.artifact
+    # the set's own order, less stock_id: linear never uses it, so a set naming it is fine
+    assert artifact.feature_names() == [c for c in chosen if c != "stock_id"]
+    assert len(artifact.coef) == 3
+    assert len(result.predictions) > 0 and np.isfinite(result.predictions["prediction"]).all()
+    # the artifact reads its columns out of the full frame, saved or not
+    X = _keyed(f, JUNE)
+    assert np.array_equal(artifact.predict(X), artifact.predict(X[chosen]))
+    artifact.save(tmp_path / "model")
+    loaded = type(artifact).load(tmp_path / "model")
+    assert loaded.feature_names() == artifact.feature_names()
+    assert np.array_equal(loaded.predict(X), artifact.predict(X))
+
+    # a column outside the set has no say, in the fit or in the prediction
+    other = f.X.copy()
+    other["Returns_1h_std"] = other["Returns_1h_std"].to_numpy()[::-1]
+    assert not np.array_equal(other["Returns_1h_std"], f.X["Returns_1h_std"], equal_nan=True)
+    got = _model("linear", feature_set="tmp_test").fit_predict_fold(
+        Frames(f.panel, other), FIT, JUNE
+    )
+    pd.testing.assert_frame_equal(got.predictions, result.predictions, check_exact=True)
+
+    # a set without the code is the same fit as the set with it
+    plain = _model("linear", feature_set="no_code").fit_predict_fold(f, FIT, JUNE)
+    assert plain.artifact.feature_names() == ["Weekday", "Returns_1h_mean"]
+    # a set that leaves nothing once stock_id is out is refused at construction
+    with pytest.raises(ValueError, match="only_code.*stock_id|stock_id.*only_code"):
+        _model("linear", feature_set="only_code")
+
+
+def test_linear_unknown_set_is_refused_before_loading(learned_data, tmp_path, monkeypatch):
+    def no_loading(*args, **kwargs):
+        raise AssertionError("the data was loaded before the model was checked")
+
+    monkeypatch.setattr("ml4trading.train.load_frames", no_loading)
+    with pytest.raises(ValueError, match=r"nope.*known"):
+        _model("linear", feature_set="nope")
+    with pytest.raises(ValueError, match="nope"):
+        train("linear", tmp_path / "run", learned_data, overrides={"model.feature_set": "nope"})
+
+
+def test_linear_missing_set_column_is_refused(frames, monkeypatch, tmp_path):
+    _feature_sets(monkeypatch, tmp_path, unknown="Weekday\nstock_id\nNo_Such_Feature\n")
+    with pytest.raises(ValueError, match="linear.*No_Such_Feature"):
+        _model("linear", feature_set="unknown").fit_predict_fold(frames["linear"], FIT, JUNE)
+
+
+def test_linear_default_set_is_bit_identical(frames, monkeypatch, tmp_path):
+    f = frames["linear"]
+    default = _model("linear").fit_predict_fold(f, FIT, JUNE)
+    assert _model("linear").params["feature_set"] == "all"
+    # the default fits every column but the code, in the frame's order, as it did before sets
+    assert default.artifact.feature_names() == [c for c in f.X.columns if c != "stock_id"]
+    # a set that lists every column (the code too) is the default fit, to the last bit
+    _feature_sets(monkeypatch, tmp_path, everything="\n".join(f.X.columns) + "\n")
+    listed = _model("linear", feature_set="everything").fit_predict_fold(f, FIT, JUNE)
+    pd.testing.assert_frame_equal(default.predictions, listed.predictions, check_exact=True)
+    assert np.array_equal(default.artifact.coef, listed.artifact.coef)
+    assert default.artifact.intercept == listed.artifact.intercept
+    assert (default.n_fit_rows, default.baseline_prediction, default.fit_label_mean) == (
+        listed.n_fit_rows,
+        listed.baseline_prediction,
+        listed.fit_label_mean,
+    )
+
+
+def test_linear_feature_set_can_be_searched(learned_data, tmp_path, monkeypatch):
+    _feature_sets(monkeypatch, tmp_path, small="stock_id\nReturns_1h_mean\nWeekday\n")
+    grid = {"model.feature_set": ["all", "small"]}
+    run = train("linear", tmp_path / "run", learned_data, grid=grid, overrides=SHORT_FOLDS)
+    fold = json.loads((run / "folds" / "F2021-07" / "fold.json").read_text())
+    assert len(fold["candidate_val_r2"]) == 2
+    assert backtest(run, learned_data)["n_periods"] > 0
+
+
 def test_default_categorical_parameters_change_nothing(frames, monkeypatch):
     import lightgbm as lgb
 

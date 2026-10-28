@@ -5,6 +5,10 @@ cross-section the model would see at that open), then by 0.0 where the whole per
 the columns are then standardized with the fit rows' mean and standard deviation. ``stock_id``
 is a category code, meaningless on a line, and is not used.
 
+Which columns a fit reads is a fit-time choice, so a grid may search it: ``feature_set`` names a
+subset of the features (``ml4trading/features/feature_sets/``; ``all`` is every column). A set
+that lists ``stock_id`` is fine -- it is left out, as it is under ``all``.
+
 The penalty is set relative to the fit rows: ``alpha = alpha_ratio * alpha_max``, ``alpha_max``
 being the smallest penalty at which every coefficient is zero -- scikit-learn's
 ``ElasticNetCV`` convention for its penalty path.
@@ -87,7 +91,7 @@ class LinearArtifact(FitArtifact):
 
 @register_model("linear")
 class LinearModel(LearnedModel):
-    PARAMS = (*LearnedModel.SHARED_PARAMS, "alpha_ratio", "l1_ratio", "max_iter")
+    PARAMS = (*LearnedModel.SHARED_PARAMS, "feature_set", "alpha_ratio", "l1_ratio", "max_iter")
     loss = "mse"
 
     def __init__(self, hold_overnight: bool, **params):
@@ -96,6 +100,19 @@ class LinearModel(LearnedModel):
             raise ValueError(f"linear: l1_ratio must lie in (0, 1], got {params['l1_ratio']}")
         if not float(params["alpha_ratio"]) > 0.0:
             raise ValueError(f"linear: alpha_ratio must be positive, got {params['alpha_ratio']}")
+        # read here, once: a misspelt set is refused before any data is loaded, and every fold of
+        # the run reads the same columns
+        self._read_feature_set()
+        if self._feature_set is not None and set(self._feature_set) <= {CATEGORICAL}:
+            raise ValueError(
+                f"linear: feature set {params['feature_set']!r} has no column but {CATEGORICAL!r}, "
+                f"which linear does not use"
+            )
+
+    def _fit_columns(self, available: pd.Index) -> list[str]:
+        """The columns a fit trains on, in order: the feature set's (every column for ``all``),
+        less ``stock_id``. A set column the features lack is an error."""
+        return [c for c in self._feature_set_columns(available) if c != CATEGORICAL]
 
     def _fit(
         self,
@@ -107,7 +124,7 @@ class LinearModel(LearnedModel):
             raise ValueError(
                 "linear: early stopping needs a boosted model; an elastic net has none"
             )
-        values = impute_by_period(X_fit.drop(columns=CATEGORICAL).astype(np.float64))
+        values = impute_by_period(X_fit[self._fit_columns(X_fit.columns)].astype(np.float64))
         mean, std = scaling_of(values)
         Z = ((values - mean) / std).to_numpy()
         l1_ratio = float(self.params["l1_ratio"])

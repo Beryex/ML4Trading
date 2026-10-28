@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 from ml4trading.config import SESSION_MINUTES
-from ml4trading.features import FEATURE_ETFS, build_features
+from ml4trading.features import FEATURE_ETFS, build_features, load_feature_set
 from ml4trading.models.base import FoldResult, Frames, Model, empty_predictions, rows_in
 from ml4trading.models.learned.horizon import (
     HORIZON_SCALES,
@@ -90,6 +90,10 @@ class LearnedModel(Model):
         "extra_features",
     )
 
+    #: The columns of the ``feature_set`` parameter, set by ``_read_feature_set`` in a model that
+    #: has one; None is every column.
+    _feature_set: list[str] | None = None
+
     def __init__(self, hold_overnight: bool, **params):
         unknown = sorted(set(params) - set(self.PARAMS))
         missing = sorted(set(self.PARAMS) - set(params))
@@ -123,6 +127,24 @@ class LearnedModel(Model):
             )
         if not isinstance(extra, bool):
             raise ValueError(f"{self.name}: extra_features must be true or false, got {extra!r}")
+
+    def _read_feature_set(self) -> None:
+        """Read the ``feature_set`` parameter into ``_feature_set`` -- the set's columns, or None
+        for ``all`` -- at construction, so that a misspelt set is refused before any data is
+        loaded and every fold of a run reads the same columns."""
+        self._feature_set = load_feature_set(self.params["feature_set"])
+
+    def _feature_set_columns(self, available: pd.Index) -> list[str]:
+        """The feature set's columns in the set's order (every column of ``available`` for
+        ``all``). A set column the features lack is an error, named."""
+        columns = list(available) if self._feature_set is None else self._feature_set
+        absent = [c for c in columns if c not in available]
+        if absent:
+            raise ValueError(
+                f"{self.name}: feature set {self.params['feature_set']!r} names column(s) the "
+                f"features do not have: {absent}"
+            )
+        return columns
 
     @property
     def horizon(self) -> int:

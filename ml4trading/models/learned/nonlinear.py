@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from ml4trading.features import CALENDAR, FEATURE_ETFS, load_feature_set
+from ml4trading.features import CALENDAR, FEATURE_ETFS
 from ml4trading.models.learned.base import EarlyStop, FitArtifact, LearnedModel
 from ml4trading.models.learned.labels import LABELS
 from ml4trading.models.learned.losses import LOSSES
@@ -193,7 +193,7 @@ class NonlinearModel(LearnedModel):
             )
         # read here, once: a misspelt set, or one that cannot serve a categorical stock_id, is
         # refused before any data is loaded, and every fold of the run reads the same columns
-        self._feature_set = load_feature_set(params["feature_set"])
+        self._read_feature_set()
         if (
             params["stock_id"] == "categorical"
             and self._feature_set is not None
@@ -220,13 +220,7 @@ class NonlinearModel(LearnedModel):
     def _fit_columns(self, available: pd.Index) -> list[str]:
         """The columns a fit trains on, in order: the feature set's (every column for ``all``),
         less ``stock_id`` under ``stock_id='drop'``. A set column the features lack is an error."""
-        columns = list(available) if self._feature_set is None else self._feature_set
-        absent = [c for c in columns if c not in available]
-        if absent:
-            raise ValueError(
-                f"nonlinear: feature set {self.params['feature_set']!r} names column(s) the "
-                f"features do not have: {absent}"
-            )
+        columns = self._feature_set_columns(available)
         if self.params["stock_id"] == "drop":
             columns = [c for c in columns if c != CATEGORICAL]
         return columns
