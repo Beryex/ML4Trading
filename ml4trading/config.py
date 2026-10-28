@@ -150,6 +150,7 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
         "model": {
             "hold_overnight": True,
             "loss": "l1",  # ML4Investment's TRAIN_OBJECTIVE, regression_l1
+            "label": "raw",  # the realized return as it is; the variants: models.learned.labels
             "num_leaves": 31,
             "min_data_in_leaf": 20,
             "learning_rate": 0.1,

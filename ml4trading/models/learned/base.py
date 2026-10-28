@@ -17,6 +17,7 @@ import pandas as pd
 from ml4trading.config import SESSION_MINUTES
 from ml4trading.features import FEATURE_ETFS, build_features
 from ml4trading.models.base import FoldResult, Frames, Model, empty_predictions, rows_in
+from ml4trading.models.learned.labels import fit_label_transform
 from ml4trading.models.learned.losses import baseline_prediction
 
 
@@ -62,10 +63,16 @@ class LearnedModel(Model):
     def loss(self) -> str:
         """The training loss (``ml4trading.models.learned.losses.LOSSES``)."""
 
+    @property
+    def label_kind(self) -> str:
+        """The label the fit trains on (``ml4trading.models.learned.labels.LABELS``): the raw
+        return unless a model has a ``label`` parameter."""
+        return "raw"
+
     @abstractmethod
     def _fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray) -> FitArtifact:
         """The estimator fitted on the fold's labelled fit rows (``X_fit`` indexed by
-        (period, symbol))."""
+        (period, symbol)); ``y_fit`` is their label after the model's ``label_kind``."""
 
     def symbol_pool(self, available: list[str]) -> list[str]:
         absent = [e for e in FEATURE_ETFS if e not in set(available)]
@@ -113,7 +120,9 @@ class LearnedModel(Model):
             fit &= self._realized_by(panel, pd.Timestamp(fit_window[1]))
         if not fit.any():
             return FoldResult(empty_predictions(), None, 0, self.loss, None)
-        y_fit = panel["y"].to_numpy(dtype=float)[fit]
+        y_raw, period = panel["y"].to_numpy(dtype=float)[fit], panel["period"].to_numpy()[fit]
+        transform = fit_label_transform(self.label_kind, y_raw, period)
+        y_fit = transform.apply(y_raw, period)
         artifact = self._fit(X[fit], y_fit)
 
         rows = rows_in(panel, predict_window)
@@ -132,4 +141,5 @@ class LearnedModel(Model):
             self.loss,
             baseline_prediction(y_fit, self.loss),
             float(np.mean(y_fit)),
+            transform,
         )

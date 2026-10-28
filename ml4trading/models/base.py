@@ -54,7 +54,10 @@ class FoldResult:
     ``baseline_prediction`` (the fit rows' mean under mse, median under l1) are set by a model
     that fits a loss; ``fit_label_mean`` (the mean label of the rows the fit trained on) is
     set by a model that fits, whatever its loss -- the reference of the validation diagnostics'
-    squared-error R². A fit-free model leaves all three None; a fit with no rows, the last two."""
+    squared-error R². ``label_transform`` (a ``ml4trading.models.learned.labels.LabelTransform``)
+    is what the fit turned its labels into before training on them; the validation scoring
+    applies it to the realized returns, so they are in the fit's units. A fit-free model leaves
+    all four None; a fit with no rows, the last three."""
 
     predictions: pd.DataFrame
     artifact: object | None
@@ -62,6 +65,7 @@ class FoldResult:
     loss: str | None = None
     baseline_prediction: float | None = None
     fit_label_mean: float | None = None
+    label_transform: object | None = None
 
 
 class Model(ABC):

@@ -11,10 +11,12 @@ from ml4trading import config
 from ml4trading.backtest import backtest
 from ml4trading.config import TIMEZONE
 from ml4trading.data import all_symbols, load_bars, load_dividends
-from ml4trading.models import Frames, get_model
-from ml4trading.models.base import rows_in
+from ml4trading.models import FoldResult, Frames, get_model
+from ml4trading.models.base import empty_predictions, rows_in
+from ml4trading.models.learned.labels import LabelTransform
 from ml4trading.models.learned.linear import impute_by_period
 from ml4trading.models.learned.losses import baseline_prediction, loss_value, oos_r2
+from ml4trading.models.learned.nonlinear import NonlinearModel
 from ml4trading.pipeline import load_frames
 from ml4trading.testing import assert_causal
 from ml4trading.train import _scored_val, train
@@ -161,9 +163,16 @@ def test_two_fits_are_identical(frames, method):
     pd.testing.assert_frame_equal(a, b, check_exact=True)
 
 
-@pytest.mark.parametrize("method", METHODS)
-def test_causal(learned_data, method):
-    model = _model(method)
+@pytest.mark.parametrize(
+    "method, params",
+    [
+        ("linear", {}),
+        ("nonlinear", {"label": "raw"}),
+        ("nonlinear", {"label": "demean_winsor"}),
+    ],
+)
+def test_causal(learned_data, method, params):
+    model = _model(method, **params)
     pool = model.symbol_pool(all_symbols(learned_data))
     loaded = model.loaded_symbols(pool)
     bars, divs = load_bars(learned_data, loaded), load_dividends(learned_data, loaded)
@@ -299,3 +308,142 @@ def test_the_linear_fit_converges_across_the_grid(frames):
             _model("linear", alpha_ratio=ratio).fit_predict_fold(
                 frames["linear"], long_fit, december
             )
+
+
+def _fit_capturing(monkeypatch, frames, **params):
+    """A nonlinear fold's result with the (X, y) its ``_fit`` was handed."""
+    seen = {}
+    real = NonlinearModel._fit
+
+    def spy(self, X_fit, y_fit):
+        seen["X"], seen["y"] = X_fit, np.array(y_fit)
+        return real(self, X_fit, y_fit)
+
+    monkeypatch.setattr(NonlinearModel, "_fit", spy)
+    result = _model("nonlinear", **params).fit_predict_fold(frames, FIT, JUNE)
+    return result, seen["X"], seen["y"]
+
+
+def _raw_fit_labels(f):
+    """The fit window's finite raw labels and their periods, in the order a fit sees them."""
+    rows = rows_in(f.panel, FIT)
+    ok = np.isfinite(rows["y"].to_numpy(dtype=float))
+    return rows["y"].to_numpy(dtype=float)[ok], rows["period"].to_numpy()[ok]
+
+
+def test_nonlinear_trains_on_the_demeaned_label(frames, monkeypatch):
+    f = frames["nonlinear"]
+    result, X_fit, y_fit = _fit_capturing(monkeypatch, f, label="demean")
+    raw, period = _raw_fit_labels(f)
+    assert len(y_fit) == len(raw) == result.n_fit_rows
+    by_period = pd.Series(y_fit).groupby(X_fit.index.get_level_values("period")).mean()
+    assert len(by_period) > 20 and (by_period.abs() < 1e-12).all()
+    want = raw - pd.Series(raw).groupby(period).transform("mean").to_numpy()
+    assert np.array_equal(y_fit, want)
+    assert result.label_transform == LabelTransform("demean")
+
+
+def test_nonlinear_trains_on_the_winsorized_label(frames, monkeypatch):
+    f = frames["nonlinear"]
+    result, _, y_fit = _fit_capturing(monkeypatch, f, label="winsor")
+    raw, _ = _raw_fit_labels(f)
+    lo, hi = np.quantile(raw, 0.005), np.quantile(raw, 0.995)
+    assert (result.label_transform.lo, result.label_transform.hi) == (lo, hi)
+    assert (raw < lo).any() and (raw > hi).any()  # the test has something to clip
+    assert np.array_equal(y_fit, np.clip(raw, lo, hi))
+
+
+def test_nonlinear_demeans_before_it_winsorizes(frames, monkeypatch):
+    f = frames["nonlinear"]
+    result, _, y_fit = _fit_capturing(monkeypatch, f, label="demean_winsor")
+    raw, period = _raw_fit_labels(f)
+    demeaned = raw - pd.Series(raw).groupby(period).transform("mean").to_numpy()
+    lo, hi = np.quantile(demeaned, 0.005), np.quantile(demeaned, 0.995)
+    assert (result.label_transform.lo, result.label_transform.hi) == (lo, hi)
+    assert np.array_equal(y_fit, np.clip(demeaned, lo, hi))
+
+
+@pytest.mark.parametrize("label", ["raw", "demean", "winsor", "demean_winsor"])
+def test_fit_label_mean_is_the_mean_of_the_labels_the_fit_trained_on(frames, monkeypatch, label):
+    f = frames["nonlinear"]
+    result, _, y_fit = _fit_capturing(monkeypatch, f, label=label)
+    assert result.fit_label_mean == float(np.mean(y_fit))
+    raw, _ = _raw_fit_labels(f)
+    if label == "raw":
+        assert result.fit_label_mean == float(np.mean(raw))
+    if label == "demean":
+        assert abs(result.fit_label_mean) < 1e-12
+    if label == "winsor":
+        assert result.fit_label_mean != float(np.mean(raw))  # the clipped tails moved it
+    # the baseline of the validation R² is a constant of the same labels
+    assert result.baseline_prediction == float(np.median(y_fit))  # nonlinear's loss is l1
+
+
+def test_linear_stays_raw(frames):
+    f = frames["linear"]
+    result = _model("linear").fit_predict_fold(f, FIT, JUNE)
+    raw, _ = _raw_fit_labels(f)
+    assert result.label_transform == LabelTransform("raw")
+    assert result.fit_label_mean == float(np.mean(raw))
+    assert result.baseline_prediction == float(np.mean(raw))  # linear's loss is mse
+
+
+def test_bad_label_is_refused():
+    with pytest.raises(ValueError, match="label"):
+        _model("nonlinear", label="rank")
+    with pytest.raises(ValueError, match="label"):
+        _model("linear", label="demean")  # linear has no such parameter: it stays raw
+    params = dict(config.resolve("nonlinear").model)
+    del params["label"]
+    with pytest.raises(ValueError, match="missing parameter.*label"):
+        get_model("nonlinear")(**params)
+
+
+def test_validation_label_uses_the_fits_transform(learned_data, tmp_path):
+    # two of the three stocks are the universe, so the pool's cross-section is not the traded one
+    overrides = {**SHORT_FOLDS, "model.label": "demean", "selector.selection_cap": 2}
+    run = train("nonlinear", tmp_path / "run", learned_data, overrides=overrides)
+    panel = load_frames(config.resolve("nonlinear"), learned_data)[1].panel
+    labelled = panel[np.isfinite(panel["y"].to_numpy(dtype=float))]
+    pool_mean = labelled.groupby("period")["y"].mean()
+    for fdir in sorted((run / "folds").iterdir()):
+        val = pd.read_parquet(fdir / "val" / "predictions.parquet")
+        fold = json.loads((fdir / "fold.json").read_text())
+        assert len(val) > 0 and val["symbol"].nunique() == 2
+        assert (val["label"] != val["y"]).all()
+        shift = val["period"].map(pool_mean).to_numpy()
+        assert np.allclose(val["label"] + shift, val["y"], rtol=0, atol=1e-12)
+        own = val.groupby("period")["y"].transform("mean").to_numpy()
+        assert not np.allclose(val["label"] + own, val["y"], rtol=0, atol=1e-12)
+        assert all(r is None or np.isfinite(r) for r in fold["candidate_val_r2"])
+
+
+def test_scored_val_labels_the_universe_by_the_pools_cross_section():
+    d1, d2 = pd.Timestamp("2021-01-04"), pd.Timestamp("2021-01-05")
+    panel = pd.DataFrame(
+        {
+            "period": [d1, d1, d1, d2, d2, d2],
+            "symbol": ["A", "B", "C"] * 2,
+            "y": [0.01, 0.03, 0.08, 0.02, np.nan, 0.04],  # B has no label in d2
+            "open_px": 10.0,
+        }
+    )
+    preds = pd.DataFrame(  # the universe is A and B; C is traded by nobody
+        {"period": [d1, d1, d2, d2], "symbol": ["A", "B", "A", "B"], "prediction": 0.001}
+    )
+    fit = FoldResult(empty_predictions(), None, 1, "mse", 0.0, 0.0, LabelTransform("demean"))
+    scored = _scored_val(fit, preds, panel, [d1, d2])
+    # d1's mean is over A, B and C (0.04); d2's over its two labelled rows (0.03), not over B
+    assert scored[["period", "symbol"]].values.tolist() == [[d1, "A"], [d1, "B"], [d2, "A"]]
+    assert np.allclose(scored["label"], [-0.03, -0.01, -0.01], rtol=0, atol=1e-15)
+    assert scored["y"].tolist() == [0.01, 0.03, 0.02]
+
+    clipped = LabelTransform("demean_winsor", lo=-0.02, hi=0.02)
+    scored = _scored_val(
+        FoldResult(empty_predictions(), None, 1, "mse", 0.0, 0.0, clipped), preds, panel, [d1, d2]
+    )
+    assert np.allclose(scored["label"], [-0.02, -0.01, -0.01], rtol=0, atol=1e-15)
+
+    for no_transform in (None, FoldResult(empty_predictions(), None, 0)):
+        scored = _scored_val(no_transform, preds, panel, [d1, d2])
+        assert scored["label"].tolist() == scored["y"].tolist() == [0.01, 0.03, 0.02]

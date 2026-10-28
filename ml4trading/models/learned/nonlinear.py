@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from ml4trading.models.learned.base import FitArtifact, LearnedModel
+from ml4trading.models.learned.labels import LABELS
 from ml4trading.models.learned.losses import LOSSES
 from ml4trading.models.registry import register_model
 
@@ -93,16 +94,22 @@ class LGBMArtifact(FitArtifact):
 
 @register_model("nonlinear")
 class NonlinearModel(LearnedModel):
-    PARAMS = ("loss", "n_estimators", *BOOSTING_PARAMS)
+    PARAMS = ("loss", "label", "n_estimators", *BOOSTING_PARAMS)
 
     def __init__(self, hold_overnight: bool, **params):
         super().__init__(hold_overnight, **params)
         if params["loss"] not in LOSSES:
             raise ValueError(f"nonlinear: unknown loss {params['loss']!r}; known: {LOSSES}")
+        if params["label"] not in LABELS:
+            raise ValueError(f"nonlinear: unknown label {params['label']!r}; known: {LABELS}")
 
     @property
     def loss(self) -> str:
         return str(self.params["loss"])
+
+    @property
+    def label_kind(self) -> str:
+        return str(self.params["label"])
 
     def _fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray) -> LGBMArtifact:
         import lightgbm as lgb
