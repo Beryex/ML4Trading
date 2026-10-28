@@ -91,7 +91,16 @@ class LearnedModel(Model):
             [panel["session"], panel["symbol"]], names=["session", "symbol"]
         )
         X = build_features(bars, pool).reindex(keys)
-        return Frames(panel, X.set_axis(panel.index))
+        X = X.set_axis(panel.index)
+        return Frames(panel, self._transform_features(X, panel))
+
+    def _transform_features(self, X: pd.DataFrame, panel: pd.DataFrame) -> pd.DataFrame:
+        """The last step of ``build_frames``: the features the fits and predictions will read,
+        from ``X`` (the build's own float32 frame, row-aligned with ``panel``). The identity by
+        default. A transform may overwrite ``X`` and return it, so that it costs no second copy
+        of a frame that is about a gigabyte on the full universe; it must keep the float32 dtype
+        and the row order, and may use only the values of the row's own period."""
+        return X
 
     def _realized_by(self, panel: pd.DataFrame, end: pd.Timestamp) -> np.ndarray:
         """Rows whose label is known by the first session after ``end``. Overnight, a label exits

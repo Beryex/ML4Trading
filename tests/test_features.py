@@ -8,6 +8,7 @@ from conftest import make_bars
 from ml4trading.config import TIMEZONE
 from ml4trading.data import load_bars
 from ml4trading.features import (
+    CALENDAR,
     FEATURE_ETFS,
     SCALE_DEPENDENT,
     build_features,
@@ -69,6 +70,20 @@ def test_a_row_holds_the_previous_sessions_values(bars):
     got = feats.xs("AAA", level="symbol")["Return_1d"]
     want = daily["Return_1d"].shift(1).astype("float32")
     assert got.equals(want)  # values, dtype and index; NaN equal
+
+
+def test_calendar_columns_exist(bars):
+    feats = build_features(bars, STOCKS, workers=1)
+    assert CALENDAR == (
+        "Weekday",
+        "Month",
+        "Day_of_Month",
+        "Day_of_Year",
+        "Week_of_Year",
+        "Week_of_Quarter",
+    )
+    assert set(CALENDAR) <= set(feats.columns)
+    assert not set(CALENDAR) & set(SCALE_DEPENDENT)
 
 
 def test_scale_filter_is_the_rule(bars):

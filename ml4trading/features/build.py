@@ -16,6 +16,11 @@ from ml4trading.features.daily import symbol_daily_features
 #: these two). They are loaded beside the pool and never become rows of their own.
 FEATURE_ETFS = ("VOO", "QQQ")
 
+#: The calendar columns: functions of the date alone, so the same for every stock of a session
+#: (but for a gap in a symbol's data). A cross-sectional transform of the features leaves them
+#: as they are: ranked within a session they would collapse to one value.
+CALENDAR = ("Weekday", "Month", "Day_of_Month", "Day_of_Year", "Week_of_Year", "Week_of_Quarter")
+
 #: Every column that a stock's price/volume scale moves (price and volume levels, indicators in
 #: price units, and ratios with a level in the denominator). Dropped: the bars are split-adjusted
 #: back from the end of the dataset, so such a level in the past tells which companies split

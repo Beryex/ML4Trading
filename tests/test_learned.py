@@ -1,4 +1,5 @@
 import json
+import tracemalloc
 import warnings
 
 import numpy as np
@@ -11,6 +12,7 @@ from ml4trading import config
 from ml4trading.backtest import backtest
 from ml4trading.config import TIMEZONE
 from ml4trading.data import all_symbols, load_bars, load_dividends
+from ml4trading.features import CALENDAR
 from ml4trading.models import FoldResult, Frames, get_model
 from ml4trading.models.base import empty_predictions, rows_in
 from ml4trading.models.learned.labels import LabelTransform
@@ -169,6 +171,7 @@ def test_two_fits_are_identical(frames, method):
         ("linear", {}),
         ("nonlinear", {"label": "raw"}),
         ("nonlinear", {"label": "demean_winsor"}),
+        ("nonlinear", {"feature_transform": "cs_rank"}),
     ],
 )
 def test_causal(learned_data, method, params):
@@ -447,3 +450,175 @@ def test_scored_val_labels_the_universe_by_the_pools_cross_section():
     for no_transform in (None, FoldResult(empty_predictions(), None, 0)):
         scored = _scored_val(no_transform, preds, panel, [d1, d2])
         assert scored["label"].tolist() == scored["y"].tolist() == [0.01, 0.03, 0.02]
+
+
+@pytest.fixture(scope="module")
+def ranked_frames(learned_data):
+    cfg = config.resolve("nonlinear", {"model.feature_transform": "cs_rank"})
+    return load_frames(cfg, learned_data)[1]
+
+
+def _left_alone(columns):
+    """The columns ``cs_rank`` does not rank: the stock code, the ETFs' and the calendar's."""
+    return [
+        c for c in columns if c == "stock_id" or c.startswith(("VOO_", "QQQ_")) or c in CALENDAR
+    ]
+
+
+def test_cs_rank_maps_each_period_onto_minus_one_to_one(frames, ranked_frames):
+    raw, ranked = frames["nonlinear"], ranked_frames
+    pd.testing.assert_frame_equal(raw.panel, ranked.panel)
+    assert ranked.X.index.equals(raw.X.index) and list(ranked.X.columns) == list(raw.X.columns)
+    assert (ranked.X.dtypes == np.float32).all()
+    columns = [c for c in raw.X.columns if c not in _left_alone(raw.X.columns)]
+    assert len(columns) > 100
+    period = raw.panel["period"].to_numpy()
+    seen = 0
+    for col in columns:
+        a, b = raw.X[col].to_numpy(), ranked.X[col].to_numpy()
+        assert np.array_equal(np.isnan(a), np.isnan(b))  # NaN stays NaN, nothing else becomes one
+        ok = ~np.isnan(a)
+        seen += int(ok.sum())
+        assert (np.abs(b[ok]) <= 1).all()
+        # within a period the order is the raw column's: equal stays equal, larger never gets less
+        d = pd.DataFrame({"p": period[ok], "a": a[ok], "b": b[ok]}).sort_values(
+            ["p", "a"], kind="stable"
+        )
+        same_period = np.diff(d["p"].to_numpy().astype("int64")) == 0
+        step = np.diff(d["b"].to_numpy(dtype=float))
+        tied = np.diff(d["a"].to_numpy(dtype=float)) == 0
+        assert (step[same_period] >= 0).all()
+        assert (step[same_period & tied] == 0).all()
+    assert seen > 100_000
+    assert not np.array_equal(
+        raw.X["Return_1d"].to_numpy(), ranked.X["Return_1d"].to_numpy(), equal_nan=True
+    )
+
+
+def test_cs_rank_three_distinct_values_give_minus_one_zero_one_and_ties_share_a_rank():
+    d1, d2 = pd.Timestamp("2021-01-04"), pd.Timestamp("2021-01-05")
+    panel = pd.DataFrame({"period": [d1, d1, d1, d2, d2, d2]})
+    X = pd.DataFrame(
+        {"f": [30.0, 10.0, 20.0, 5.0, 5.0, 9.0], "g": [1.0, 1.0, 1.0, 2.0, 1.0, 3.0]},
+        dtype=np.float32,
+    )
+    got = _model("nonlinear", feature_transform="cs_rank")._transform_features(X, panel)
+    assert got["f"].tolist() == [1.0, -1.0, 0.0, -0.5, -0.5, 1.0]  # d2: ranks 1.5, 1.5, 3
+    assert got["g"].tolist() == [0.0, 0.0, 0.0, 0.0, -1.0, 1.0]  # d1 all tied: the middle rank
+    assert set(got.dtypes) == {np.dtype("float32")}
+
+
+def test_cs_rank_matches_the_definition_on_random_periods():
+    rng = np.random.default_rng(seed=11)
+    period = np.repeat(pd.date_range("2021-01-04", periods=80), 9)
+    values = rng.integers(0, 5, size=period.size).astype(np.float32)  # many ties
+    values[rng.random(period.size) < 0.65] = np.nan
+    X = pd.DataFrame({"f": values})
+    model = _model("nonlinear", feature_transform="cs_rank")
+    got = model._transform_features(X, pd.DataFrame({"period": period}))["f"].to_numpy()
+    want, counts = np.full(values.size, np.nan), []
+    for p in np.unique(period):
+        at = np.flatnonzero((period == p) & ~np.isnan(values))
+        x = values[at]
+        counts.append(len(x))
+        # the average-tie rank by definition: the values below, plus the middle of the ties
+        rank = np.array([(x < v).sum() + ((x == v).sum() + 1) / 2 for v in x])
+        want[at] = 0.0 if len(x) == 1 else 2 * (rank - 1) / max(len(x) - 1, 1) - 1
+    assert {0, 1} <= set(counts) and max(counts) > 5  # the empty and the lone periods occur
+    np.testing.assert_allclose(got, want, rtol=0, atol=1e-7)
+
+
+def test_cs_rank_leaves_market_calendar_and_id_columns(frames, ranked_frames):
+    raw, ranked = frames["nonlinear"].X, ranked_frames.X
+    kept = _left_alone(raw.columns)
+    etf = [c for c in kept if c.startswith(("VOO_", "QQQ_"))]
+    assert len(etf) == 2 * 7  # eight embedded features each, less the scale-dependent MACD_hist
+    assert len(kept) == 1 + len(etf) + len(CALENDAR)
+    assert set(CALENDAR) <= set(kept) and "stock_id" in kept
+    assert raw[kept].notna().any().all()
+    pd.testing.assert_frame_equal(ranked[kept], raw[kept], check_exact=True)
+
+
+def test_cs_rank_edge_periods():
+    """Review Focus 5: a column that is all NaN in a period stays NaN; a period with one value
+    maps it to 0.0; neither divides by zero."""
+    d = pd.to_datetime(["2021-01-04", "2021-01-05", "2021-01-06", "2021-01-07", "2021-01-08"])
+    panel = pd.DataFrame({"period": [d[0]] * 3 + [d[1]] * 3 + [d[2]] * 3 + [d[3]] + [d[4]] * 2})
+    nan = np.nan
+    X = pd.DataFrame(
+        {
+            "stock_id": [0.0, 1.0, 2.0] * 3 + [0.0, 1.0, 2.0],
+            #                one value  all NaN         all equal      alone  one value among NaN
+            "Return_1d": [nan, 5.0, nan, nan, nan, nan, 7.0, 7.0, 7.0, 3.0, nan, 8.0],
+            "Volume_MA_ratio": [1.0, 2.0, 3.0] + [nan] * 9,  # NaN but in its first period
+            "RSI_14d": [nan] * 12,  # all NaN everywhere
+            "VOO_Return_1d": [nan, 5.0, nan] * 4,
+            "Weekday": [0.0] * 12,
+        },
+        dtype=np.float32,
+    )
+    before = X.copy()
+    with warnings.catch_warnings(), np.errstate(all="raise"):
+        warnings.simplefilter("error")
+        got = _model("nonlinear", feature_transform="cs_rank")._transform_features(X, panel)
+    want = {
+        "Return_1d": [nan, 0, nan, nan, nan, nan, 0, 0, 0, 0, nan, 0],
+        "Volume_MA_ratio": [-1, 0, 1] + [nan] * 9,
+        "RSI_14d": [nan] * 12,
+    }
+    for col, values in want.items():
+        pd.testing.assert_series_equal(got[col], pd.Series(values, dtype=np.float32, name=col))
+    for col in ("stock_id", "VOO_Return_1d", "Weekday"):
+        pd.testing.assert_series_equal(got[col], before[col])
+
+
+def test_feature_transform_none_returns_the_frame_untouched(frames):
+    f = frames["nonlinear"]
+    for method in METHODS:
+        assert _model(method)._transform_features(f.X, f.panel) is f.X
+
+
+def test_cs_rank_does_not_copy_the_frame():
+    rng = np.random.default_rng(0)
+    periods, rows, columns = 400, 50, 200
+    panel = pd.DataFrame({"period": np.repeat(pd.date_range("2020-01-01", periods=periods), rows)})
+    X = pd.DataFrame(
+        rng.normal(size=(periods * rows, columns)).astype(np.float32),
+        columns=[f"f{i}" for i in range(columns)],
+    )
+    size = int(X.memory_usage(deep=True).sum())
+    model = _model("nonlinear", feature_transform="cs_rank")
+    tracemalloc.start()
+    try:
+        ranked = model._transform_features(X, panel)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert (ranked.dtypes == np.float32).all() and ranked.shape == (periods * rows, columns)
+    assert peak < size / 4  # a second copy of the frame would be 1.0 x
+
+
+def test_feature_transform_cannot_be_searched(learned_data, tmp_path, monkeypatch):
+    def no_loading(*args, **kwargs):
+        raise AssertionError("the data was loaded before the grid was checked")
+
+    monkeypatch.setattr("ml4trading.train.load_frames", no_loading)
+    assert NonlinearModel.FRAME_PARAMS == ("hold_overnight", "feature_transform")
+    with pytest.raises(ValueError, match="feature_transform.*cannot be searched"):
+        train(
+            "nonlinear",
+            tmp_path / "run",
+            learned_data,
+            grid={"model.feature_transform": ["none", "cs_rank"]},
+        )
+
+
+def test_bad_feature_transform_is_refused():
+    with pytest.raises(ValueError, match="feature_transform"):
+        _model("nonlinear", feature_transform="zscore")
+    with pytest.raises(ValueError, match="feature_transform"):
+        _model("linear", feature_transform="cs_rank")  # linear has no such parameter
+    params = dict(config.resolve("nonlinear").model)
+    del params["feature_transform"]
+    with pytest.raises(ValueError, match="missing parameter.*feature_transform"):
+        get_model("nonlinear")(**params)

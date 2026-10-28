@@ -22,10 +22,10 @@ Public API:
 - ``build_features(bars, pool, workers=None)`` -- the pool's float32 feature matrix, indexed by
   (session, symbol);
 - ``symbol_daily_features(bars)`` -- one symbol's unshifted daily features;
-- ``FEATURE_ETFS``, ``SCALE_DEPENDENT``.
+- ``CALENDAR``, ``FEATURE_ETFS``, ``SCALE_DEPENDENT``.
 """
 
-from ml4trading.features.build import FEATURE_ETFS, SCALE_DEPENDENT, build_features
+from ml4trading.features.build import CALENDAR, FEATURE_ETFS, SCALE_DEPENDENT, build_features
 from ml4trading.features.daily import symbol_daily_features
 
-__all__ = ["FEATURE_ETFS", "SCALE_DEPENDENT", "build_features", "symbol_daily_features"]
+__all__ = ["CALENDAR", "FEATURE_ETFS", "SCALE_DEPENDENT", "build_features", "symbol_daily_features"]
