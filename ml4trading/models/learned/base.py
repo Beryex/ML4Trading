@@ -6,7 +6,9 @@ rows, the label, causality -- is here, so the methods cannot differ on it.
 
 A fit may also be given a validation evaluation set (``EarlyStop``): a booster then stops on its
 squared error there and keeps the best round. The set is built here, in the units the fit trains
-on, so that the label transform and the unlabelled rows are handled once for every method.
+on, so that the label transform and the unlabelled rows are handled once for every method. A
+model whose prediction of a row reads the other rows of its period is also handed every pool row
+of the evaluation periods, so that it predicts the evaluation rows as the fold will.
 
 The label is the horizon label (``ml4trading.models.learned.horizon``): the return over the next
 ``horizon`` sessions, or ``horizon: 1``, the next session's, exactly as before. A fit uses only
@@ -74,6 +76,12 @@ class EarlyStop:
     symbols: tuple[str, ...]
     max_rounds: int
     patience: int
+
+
+#: What a fit asked to stop early is handed (``LearnedModel._evaluation_rows``): the evaluation
+#: rows' features and labels, the ``EarlyStop`` that chose them, and the features of every pool row
+#: of their periods -- None unless the model reads them (``_needs_eval_cross_section``).
+EvalSet = tuple[pd.DataFrame, np.ndarray, EarlyStop, pd.DataFrame | None]
 
 
 class FitArtifact(ABC):
@@ -238,20 +246,29 @@ class LearnedModel(Model):
         return unless a model has a ``label`` parameter."""
         return "raw"
 
+    @property
+    def _needs_eval_cross_section(self) -> bool:
+        """Whether a fit asked to stop early also needs every pool row of the evaluation periods
+        (the last part of an ``EvalSet``): a model whose prediction of a row reads the other rows
+        of its period says so, to predict the evaluation rows as the fold will. False here, so the
+        set costs no copy of those rows."""
+        return False
+
     @abstractmethod
     def _fit(
         self,
         X_fit: pd.DataFrame,
         y_fit: np.ndarray,
-        eval_set: tuple[pd.DataFrame, np.ndarray, EarlyStop] | None = None,
+        eval_set: EvalSet | None = None,
     ) -> FitArtifact:
         """The estimator fitted on the fold's labelled fit rows (``X_fit`` indexed by
         (period, symbol)); ``y_fit`` is their label after the model's ``label_kind``.
         ``eval_set`` is None, or the features and labels (in the same units as ``y_fit``) of the
-        evaluation rows and the ``EarlyStop`` that chose them. It is passed only when a fit asks
-        to stop early, so a model that cannot may leave the parameter out of its signature (a
-        two-argument ``_fit``, which then fails with a TypeError if asked to); one that keeps it
-        refuses a set."""
+        evaluation rows, the ``EarlyStop`` that chose them and, for a model that needs it, every
+        pool row of their periods (``EvalSet``). It is passed only when a fit asks to stop early,
+        so a model that cannot may leave the parameter out of its signature (a two-argument
+        ``_fit``, which then fails with a TypeError if asked to); one that keeps it refuses a
+        set."""
 
     def symbol_pool(self, available: list[str]) -> list[str]:
         absent = [e for e in FEATURE_ETFS if e not in set(available)]
@@ -308,7 +325,8 @@ class LearnedModel(Model):
         horizon: int = 1,
         horizon_scale: str = "sum",
         sigma: np.ndarray | None = None,
-    ) -> tuple[pd.DataFrame, np.ndarray, EarlyStop]:
+        cross_section: bool = False,
+    ) -> EvalSet:
         """The early-stopping set: the rows of ``early_stop.periods`` x ``early_stop.symbols``
         with a label (a symbol's last overnight period has none), and their label through the
         fold's ``transform`` (``ml4trading.models.learned.horizon.window_labels``). With
@@ -318,12 +336,17 @@ class LearnedModel(Model):
         periods, so a period's mean is the pool's cross-section the fit demeaned over, and only
         then taken at the evaluation rows. With ``sigma`` (row-aligned with ``panel``) the label
         is divided by it first, as in the fit; a row without a sigma is no label. ``X`` is
-        indexed by (period, symbol), row-aligned with ``panel``."""
+        indexed by (period, symbol), row-aligned with ``panel``.
+
+        With ``cross_section`` the set ends with the features of every pool row of the periods,
+        labelled or not -- the rows a fold's prediction for those periods reads, the evaluation
+        rows among them -- and with None otherwise."""
         label = window_labels(panel, early_stop.periods, horizon, horizon_scale, transform, sigma)
         rows = np.isfinite(label) & panel["symbol"].isin(set(early_stop.symbols)).to_numpy()
         if not rows.any():
             raise ValueError("early stopping: no labelled evaluation row")
-        return X[rows], label[rows], early_stop
+        in_periods = panel["period"].isin(set(early_stop.periods)).to_numpy()
+        return X[rows], label[rows], early_stop, X[in_periods] if cross_section else None
 
     def fit_predict_fold(
         self, frames: Frames, fit_window, predict_window, early_stop: EarlyStop | None = None
@@ -362,7 +385,14 @@ class LearnedModel(Model):
             None
             if early_stop is None
             else self._evaluation_rows(
-                panel, X, transform, early_stop, self.horizon, self.horizon_scale, sigma
+                panel,
+                X,
+                transform,
+                early_stop,
+                self.horizon,
+                self.horizon_scale,
+                sigma,
+                self._needs_eval_cross_section,
             )
         )
         # a model that cannot stop early may declare ``_fit`` without ``eval_set``

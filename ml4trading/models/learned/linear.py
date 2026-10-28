@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import ElasticNet
 
-from ml4trading.models.learned.base import EarlyStop, FitArtifact, LearnedModel
+from ml4trading.models.learned.base import EvalSet, FitArtifact, LearnedModel
 from ml4trading.models.registry import register_model
 
 CATEGORICAL = "stock_id"
@@ -143,7 +143,7 @@ class LinearModel(LearnedModel):
         self,
         X_fit: pd.DataFrame,
         y_fit: np.ndarray,
-        eval_set: tuple[pd.DataFrame, np.ndarray, EarlyStop] | None = None,
+        eval_set: EvalSet | None = None,
     ) -> LinearArtifact:
         if eval_set is not None:
             raise ValueError(

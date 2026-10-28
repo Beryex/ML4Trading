@@ -490,7 +490,7 @@ def test_early_stopping_set_is_in_the_fits_units(frames, monkeypatch):
     f = frames["nonlinear"]
     panel = f.panel
     june = sorted(rows_in(panel, JUNE)["period"].unique())
-    result, (X_eval, y_eval, _) = _eval_set_of(
+    result, (X_eval, y_eval, _, _) = _eval_set_of(
         monkeypatch, f, june, risk_adjust="vol_return", label="demean"
     )
     # y / sigma, demeaned over the pool's three names, then taken at the two evaluation names
@@ -503,7 +503,7 @@ def test_early_stopping_set_is_in_the_fits_units(frames, monkeypatch):
     assert result.best_iteration is not None and np.isfinite(result.eval_mse)
     # rows without a sigma are no evaluation rows: early periods start at the 23rd session
     early = sorted(rows_in(panel, JANUARY_TO_FEBRUARY)["period"].unique())
-    _, (X_early, y_early, _) = _eval_set_of(monkeypatch, f, early, risk_adjust="vol")
+    _, (X_early, y_early, _, _) = _eval_set_of(monkeypatch, f, early, risk_adjust="vol")
     assert np.isfinite(y_early).all()
     assert (
         X_early.index.get_level_values("period").min()

@@ -332,7 +332,7 @@ def test_early_stopping_stays_on_the_raw_output(frames, monkeypatch):
     raw = _model("nonlinear").fit_predict_fold(f, FIT, JUNE, early_stop=stop)
     smooth = _model("nonlinear", smooth_halflife=3).fit_predict_fold(f, FIT, JUNE, early_stop=stop)
     # the same booster stopped at the same round on the same raw squared error ...
-    (X_raw, y_raw, _), (X_smooth, y_smooth, _) = seen
+    (X_raw, y_raw, _, _), (X_smooth, y_smooth, _, _) = seen
     assert X_raw.index.equals(X_smooth.index) and np.array_equal(y_raw, y_smooth)
     assert raw.best_iteration is not None
     assert (smooth.best_iteration, smooth.eval_mse) == (raw.best_iteration, raw.eval_mse)

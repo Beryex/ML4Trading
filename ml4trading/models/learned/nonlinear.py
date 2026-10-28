@@ -27,13 +27,17 @@ a set one needs ``loss='mse'``, which is refused at construction as well.
 
 With ``init_model='linear'`` the booster starts from an initial estimate F0 (Friedman 2001,
 "Greedy Function Approximation: A Gradient Boosting Machine") in place of LightGBM's own constant
-start: ``linear``'s elastic net, fitted first on the same fit rows and the same labels, in the
+start: an elastic net fitted first as ``linear`` fits one, on the same frame (under ``cs_rank``,
+the ranked features, which ``linear`` never reads), the same fit rows and the same labels, in the
 units the booster trains on (``init_alpha_ratio``, ``init_l1_ratio`` and ``init_feature_set`` are
 its ``alpha_ratio``, ``l1_ratio`` and ``feature_set``). Its prediction is LightGBM's
 ``init_score`` (Dataset) on the fit rows and on the early-stopping rows, so the trees fit what the
-net leaves and stop on the whole model's error. LightGBM's own prediction is the trees' alone, so
-the fitted model (``HybridArtifact``) adds the net's back. A monotone constraint would bind the
-trees, not the net, and is refused with it.
+net leaves and stop on the whole model's error. On the early-stopping rows the net reads each
+period's whole pool cross-section, as the fold's prediction does, so a missing value gets the
+same median there, and the error stopped on is that of the predictions the fold will make on
+those rows. LightGBM's own prediction is the trees' alone, so the fitted model
+(``HybridArtifact``) adds the net's back. A monotone constraint would bind the trees, not the
+net, and is refused with it.
 
 A fit reproduces exactly only with ``deterministic`` and ``force_row_wise`` (ML4Investment's
 fixed training configuration) and the same thread count, which is therefore fixed here, not read
@@ -52,7 +56,7 @@ import pandas as pd
 
 from ml4trading.config import METHOD_DEFAULTS
 from ml4trading.features import CALENDAR, FEATURE_ETFS, load_feature_set
-from ml4trading.models.learned.base import EarlyStop, FitArtifact, LearnedModel
+from ml4trading.models.learned.base import EvalSet, FitArtifact, LearnedModel
 from ml4trading.models.learned.labels import LABELS
 from ml4trading.models.learned.linear import LinearArtifact, fit_elastic_net
 from ml4trading.models.learned.losses import LOSSES
@@ -406,6 +410,12 @@ class NonlinearModel(LearnedModel):
         return str(self.params["loss"])
 
     @property
+    def _needs_eval_cross_section(self) -> bool:
+        """The linear initial score fills a missing value with the median of its period's rows,
+        so its prediction of an evaluation row reads the rest of the period."""
+        return self.params["init_model"] != "none"
+
+    @property
     def label_kind(self) -> str:
         return str(self.params["label"])
 
@@ -470,7 +480,7 @@ class NonlinearModel(LearnedModel):
         self,
         X_fit: pd.DataFrame,
         y_fit: np.ndarray,
-        eval_set: tuple[pd.DataFrame, np.ndarray, EarlyStop] | None = None,
+        eval_set: EvalSet | None = None,
     ) -> LGBMArtifact | HybridArtifact:
         import lightgbm as lgb
 
@@ -500,14 +510,18 @@ class NonlinearModel(LearnedModel):
             booster = lgb.train(params, data, num_boost_round=int(self.params["n_estimators"]))
             trees = LGBMArtifact(booster)
             return trees if init is None else HybridArtifact(trees, init)
-        X_eval, y_eval, stop = eval_set
+        X_eval, y_eval, stop, cross_section = eval_set
         # the evaluation error is the squared one whatever the training loss (under ``l1`` the
         # objective's own default metric would be the absolute error)
         params["metric"] = "l2"
         # the evaluation rows start from the linear part's prediction on them as well, so the
-        # error the fit stops on is the whole model's. The net imputes a missing value with the
-        # median of the period's rows it is handed, as ``linear`` does: here the evaluation rows
-        eval_start = {} if init is None else {"init_score": init.predict(X_eval)}
+        # error the fit stops on is the whole model's. The net fills a missing value with the
+        # median of its period's rows, so it is handed every pool row of the evaluation periods,
+        # as the fold's prediction hands it, and only then are the evaluation rows taken
+        eval_start = {}
+        if init is not None:
+            whole = init.predict(cross_section)
+            eval_start = {"init_score": whole[cross_section.index.get_indexer(X_eval.index)]}
         booster = lgb.train(
             params,
             data,

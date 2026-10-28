@@ -179,6 +179,10 @@ def test_two_fits_are_identical(frames, method):
         ("nonlinear", {"horizon": 5}),
         ("nonlinear", {"init_model": "linear"}),
         ("nonlinear", {"init_model": "linear", "label": "demean_winsor", "risk_adjust": "vol"}),
+        (
+            "nonlinear",
+            {"init_model": "linear", "smooth_halflife": 3, "horizon": 5, "risk_adjust": "vol"},
+        ),
     ],
 )
 def test_causal(learned_data, method, params):
@@ -1013,7 +1017,7 @@ def test_early_stopping_drops_unlabelled_rows(frames, monkeypatch):
     result, eval_set = _early_stopping_capturing(
         monkeypatch, f, EarlyStop((*june, last), POOL, 50, 5)
     )
-    X_eval, y_eval, _ = eval_set
+    X_eval, y_eval, _, _ = eval_set
     assert np.isfinite(y_eval).all()
     assert last not in set(X_eval.index.get_level_values("period"))
     assert np.isfinite(result.eval_mse)
@@ -1122,8 +1126,10 @@ def test_early_stopping_reads_the_fit_columns(frames, monkeypatch):
     f = frames["nonlinear"]
     stop = EarlyStop(_periods_of(f, JUNE), POOL, 50, 5)
     result, eval_set = _early_stopping_capturing(monkeypatch, f, stop, stock_id="drop")
-    X_eval, _, given = eval_set
+    X_eval, _, given, cross_section = eval_set
     assert given is stop
+    # the periods' whole cross-section is built only for a model that reads it (a hybrid)
+    assert cross_section is None
     # the evaluation frame holds every feature column; LightGBM was handed only the fit's
     assert "stock_id" in X_eval.columns
     assert result.artifact.feature_names() == [c for c in f.X.columns if c != "stock_id"]
@@ -1368,7 +1374,7 @@ def test_monotone_constraints_are_aligned_with_the_fit_columns(frames, monkeypat
     up = _along(artifact, X, "Volatility_5d")
     down = _along(artifact, X, "Return_1d")
     assert (np.diff(up, axis=1) >= -1e-12).all() and (np.diff(down, axis=1) <= 1e-12).all()
-    assert np.ptp(up, axis=1).min() > 0 and np.ptp(down, axis=1).min() >= 0
+    assert np.ptp(up, axis=1).min() > 0 and np.ptp(down, axis=1).min() > 0
     # the same fit left free is not monotone in the first (so the check has power)
     free = _model("nonlinear", **params).fit_predict_fold(f, FIT, JUNE).artifact
     assert "monotone_constraints=" not in free.booster.model_to_string()
@@ -1528,7 +1534,7 @@ def test_monotone_constraints_reach_the_run_files(learned_data, tmp_path, monkey
     assert meta["grid"] == {"model.monotone_constraints": [{}, constraints]}
     assert RunConfig.from_dict(meta["config"]).model["monotone_constraints"] == constraints
     fold = json.loads((run / "folds" / "F2021-07" / "fold.json").read_text())
-    assert fold["model_params"]["monotone_constraints"] in ({}, constraints)
+    assert fold["model_params"]["monotone_constraints"] == [{}, constraints][fold["chosen"]]
     assert len(fold["candidate_val_net_sharpe"]) == 2
     # the saved booster of the constrained candidate carries the constraints
     text = (run / "folds" / "F2021-07" / "model" / "model.txt").read_text()
@@ -1655,17 +1661,22 @@ def test_hybrid_early_stopping_uses_the_linear_init_on_eval_rows(frames, monkeyp
     made = _datasets_capturing(monkeypatch)
     f = _linear_signal(frames)
     stop = EarlyStop(_periods_of(f, JUNE), ("AAA", "BBB"), 50, 5)
-    result, (X_eval, y_eval, _) = _early_stopping_capturing(
+    result, (X_eval, y_eval, _, cross_section) = _early_stopping_capturing(
         monkeypatch, f, stop, init_model="linear", loss="mse"
     )
     artifact = result.artifact
     assert 1 <= result.best_iteration <= 50
     # the evaluation Dataset starts from the linear part's prediction on its own rows, as the
-    # training one does on the fit rows
+    # training one does on the fit rows: read over every pool row of the evaluation periods, as
+    # the fold's prediction reads them, then taken at the evaluation rows
     _, evaluated = made
     assert evaluated["reference"] is not None
     assert np.array_equal(evaluated["label"], y_eval)
-    assert np.array_equal(evaluated["init_score"], artifact.init.predict(X_eval))
+    assert cross_section.index.equals(_keyed(f, JUNE).index)
+    whole = artifact.init.predict(cross_section)
+    assert np.array_equal(
+        evaluated["init_score"], whole[cross_section.index.get_indexer(X_eval.index)]
+    )
     # so the error it stopped on is the hybrid's, the linear part plus the kept rounds (LightGBM
     # holds the labels in float32, hence the tolerance) ...
     hybrid = np.mean((y_eval - artifact.predict(X_eval)) ** 2)
@@ -1683,6 +1694,85 @@ def test_hybrid_early_stopping_uses_the_linear_init_on_eval_rows(frames, monkeyp
     assert result.eval_mse == pytest.approx(
         np.mean((both["y"] - both["prediction"]) ** 2), rel=1e-6
     )
+
+
+@pytest.mark.parametrize("params", [{}, {"risk_adjust": "vol", "smooth_halflife": 3}])
+def test_hybrid_early_stopping_error_is_the_folds_own(frames, monkeypatch, params):
+    # values missing in the evaluation periods: the net fills each with the median of its
+    # period's rows, which the fold's own prediction takes over the period's whole cross-section,
+    # not over the evaluation rows (here two of the three names, and only the labelled ones)
+    f = _linear_signal(frames)
+    june = f.panel.index.isin(rows_in(f.panel, JUNE).index)
+    holes = june & (np.random.default_rng(1).random(len(f.panel)) < 0.3)
+    X = f.X.copy()
+    X.loc[holes, "Volatility_5d"] = np.nan
+    f = Frames(f.panel, X)
+    stop = EarlyStop(_periods_of(f, JUNE), ("AAA", "BBB"), 50, 5)
+    result, (X_eval, y_eval, _, _) = _early_stopping_capturing(
+        monkeypatch, f, stop, init_model="linear", loss="mse", **params
+    )
+    assert X_eval["Volatility_5d"].isna().any() and result.best_iteration is not None
+    # the fold's own output on the evaluation rows, before any scaling or smoothing: the units
+    # the evaluation labels are in
+    own = result.fit_predictions if params else result.predictions["prediction"]
+    keys = pd.MultiIndex.from_frame(result.predictions[["period", "symbol"]])
+    at = pd.Series(own.to_numpy(), index=keys).reindex(X_eval.index).to_numpy()
+    assert len(at) > 0 and np.isfinite(at).all()
+    # LightGBM holds the labels in float32: against those, the error it stopped on is the fold's
+    # own to 1e-9, and against the float64 labels to float32's precision
+    held = y_eval.astype(np.float32).astype(float)
+    assert result.eval_mse == pytest.approx(np.mean((held - at) ** 2), rel=0, abs=1e-9)
+    assert result.eval_mse == pytest.approx(np.mean((y_eval - at) ** 2), rel=1e-6)
+
+
+def test_a_hybrid_without_early_stopping_trains_the_booster_from_the_net(frames, monkeypatch):
+    # a hybrid fit without early stopping is the net's fit, then one booster trained from its
+    # in-sample prediction for n_estimators rounds: nothing of the early-stopping set reaches it
+    import lightgbm as lgb
+
+    from ml4trading.models.learned.linear import fit_elastic_net
+
+    real_train, calls = lgb.train, []
+
+    def spy_train(params, train_set, *args, **kwargs):
+        calls.append((dict(params), args, kwargs))
+        return real_train(params, train_set, *args, **kwargs)
+
+    monkeypatch.setattr(lgb, "train", spy_train)
+    made = _datasets_capturing(monkeypatch)
+    params = {
+        "init_model": "linear",
+        "loss": "mse",
+        "risk_adjust": "vol",
+        "stock_id": "drop",
+        "extra_trees": True,
+        "feature_fraction": 0.5,
+        "bagging_fraction": 0.5,
+        "bagging_freq": 1,
+        "n_estimators": 30,
+    }
+    result, X_fit, y_fit = _fit_capturing(monkeypatch, frames["nonlinear"], **params)
+    ((given, args, kwargs),) = calls
+    assert "metric" not in given and args == () and kwargs == {"num_boost_round": 30}
+    (fitted,) = made
+    assert set(fitted) == {"label", "categorical_feature", "init_score"}
+    # the same booster, trained here by hand from the same pieces
+    columns = [c for c in X_fit.columns if c != "stock_id"]
+    max_iter = config.METHOD_DEFAULTS["linear"]["model"]["max_iter"]
+    net = fit_elastic_net(X_fit[columns], y_fit, 0.01, 0.5, max_iter)
+    data = lgb.Dataset(
+        X_fit[columns], label=y_fit, categorical_feature=[], init_score=net.predict(X_fit)
+    )
+    by_hand = real_train(given, data, num_boost_round=30)
+    assert result.artifact.booster.model_to_string() == by_hand.model_to_string()
+
+
+def test_a_smoothed_risk_adjusted_horizon_hybrid_fits(frames):
+    # the hybrid with a multi-session label, the volatility scaling and the smoothing at once
+    result = _hybrid(frames["nonlinear"], smooth_halflife=3, horizon=5, risk_adjust="vol")
+    assert len(result.predictions) > 0 and np.isfinite(result.predictions["prediction"]).all()
+    assert np.isfinite(result.fit_predictions).all()
+    assert result.horizon == 5 and result.risk_adjust == "vol"
 
 
 def test_init_model_none_ignores_the_init_parameters(frames, monkeypatch, tmp_path):
@@ -2157,7 +2247,7 @@ def test_early_stopping_labels_respect_the_window(frames, monkeypatch):
     june = _periods_of(f, JUNE)
     stop = EarlyStop(june, POOL, 50, 5)
     result, eval_set = _early_stopping_capturing(monkeypatch, f, stop, horizon=3)
-    X_eval, y_eval, _ = eval_set
+    X_eval, y_eval, _, _ = eval_set
     # the last two sessions of June exit after July's first open
     assert set(X_eval.index.get_level_values("period")) == set(june[:-2])
     assert np.isfinite(y_eval).all() and np.isfinite(result.eval_mse)

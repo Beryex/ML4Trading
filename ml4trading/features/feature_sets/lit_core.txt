@@ -1,4 +1,4 @@
-# Literature core for nonlinear (ruling R36): short-term reversal and momentum, intraday/overnight,
+# Literature core for nonlinear: short-term reversal and momentum, intraday/overnight,
 # volume, and the slow features of ml4trading.features.slow (extra_features: true).
 stock_id
 Return_1d

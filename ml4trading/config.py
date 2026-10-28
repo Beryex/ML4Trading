@@ -231,8 +231,9 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             # defaults: extra_trees (off; Geurts, Ernst & Wehenkel 2006, "Extremely randomized
             # trees": LightGBM then checks one randomly drawn threshold per feature at a node),
             # path_smooth (0.0: no smoothing applied to tree nodes, which guards leaves with few
-            # rows; above 0 it needs min_data_in_leaf >= 2), feature_fraction_bynode (1.0: every
-            # feature is a candidate at each node; below 1 it multiplies feature_fraction)
+            # rows; above 0 LightGBM silently raises a min_data_in_leaf below 2 to 2),
+            # feature_fraction_bynode (1.0: every feature is a candidate at each node; below 1 it
+            # multiplies feature_fraction)
             "extra_trees": False,
             "path_smooth": 0.0,
             "feature_fraction_bynode": 1.0,
