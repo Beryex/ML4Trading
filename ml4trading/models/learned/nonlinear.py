@@ -16,6 +16,15 @@ numerical features its path splits on (Shi, Li & Li 2019, "Gradient Boosting Wit
 Linear Regression Trees"; ridge-penalised by ``linear_lambda``); a row that lacks one of those
 features gets the leaf's constant output instead. LightGBM fits it on ``mse`` only.
 
+``monotone_constraints`` maps feature names to -1, 0 or 1: the booster's output is then
+non-increasing, free or non-decreasing in that feature. It is a mapping, not a LightGBM parameter
+as it stands: each fit turns it into LightGBM's list, one sign per column the fit trains on in the
+fit's order (a column not named gets 0), and passes nothing when no sign is set. A name the fit
+does not train on is refused; so is a constraint on the categorical ``stock_id`` (LightGBM aborts
+the process on one) and one beside ``linear_tree`` (LightGBM enforces a constraint when it picks a
+split, not in a leaf's linear model). LightGBM refuses a constraint on ``regression_l1`` too, so
+a set one needs ``loss='mse'``, which is refused at construction as well.
+
 A fit reproduces exactly only with ``deterministic`` and ``force_row_wise`` (ML4Investment's
 fixed training configuration) and the same thread count, which is therefore fixed here, not read
 from the machine. LightGBM is imported only when a booster is trained or loaded: it needs an
@@ -24,6 +33,7 @@ OpenMP runtime (on macOS, ``brew install libomp``) that the other methods do not
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -45,6 +55,11 @@ CATEGORICAL = "stock_id"
 FEATURE_TRANSFORMS = ("none", "cs_rank")
 #: ``categorical``: ``stock_id`` is a LightGBM categorical feature; ``drop``: it is not used.
 STOCK_ID_MODES = ("categorical", "drop")
+#: The signs of ``monotone_constraints``: non-increasing, unconstrained, non-decreasing.
+MONOTONE_SIGNS = (-1, 0, 1)
+#: LightGBM's ``monotone_constraints_method`` values (Parameters, "Learning Control Parameters");
+#: it takes any other string without complaint, so they are listed here.
+MONOTONE_METHODS = ("basic", "intermediate", "advanced")
 
 #: LightGBM's own parameter names, passed to it as they are.
 BOOSTING_PARAMS = (
@@ -70,6 +85,13 @@ BOOSTING_PARAMS = (
     # by ``linear_lambda``; LightGBM 4's defaults, see config.METHOD_DEFAULTS
     "linear_tree",
     "linear_lambda",
+    # noise-robust splits: extremely randomized trees (Geurts, Ernst & Wehenkel 2006), node
+    # smoothing, a per-node feature draw; and how ``monotone_constraints`` is enforced. LightGBM 4's
+    # defaults, see config.METHOD_DEFAULTS
+    "extra_trees",
+    "path_smooth",
+    "feature_fraction_bynode",
+    "monotone_constraints_method",
 )
 OBJECTIVES = {"mse": "regression", "l1": "regression_l1"}
 
@@ -179,6 +201,7 @@ class NonlinearModel(LearnedModel):
         "feature_set",
         "n_estimators",
         *BOOSTING_PARAMS,
+        "monotone_constraints",  # not passed as it is: see ``_monotone_signs``
     )
     #: The features are built once per run, with ``extra_features`` joined and
     #: ``feature_transform`` applied.
@@ -208,6 +231,7 @@ class NonlinearModel(LearnedModel):
                 "nonlinear: linear_tree cannot be fitted on loss='l1' (LightGBM refuses "
                 "regression_l1 with linear trees); use loss='mse'"
             )
+        self._check_monotone_constraints(params)
         # read here, once: a misspelt set, or one that cannot serve a categorical stock_id, is
         # refused before any data is loaded, and every fold of the run reads the same columns
         self._read_feature_set()
@@ -219,6 +243,51 @@ class NonlinearModel(LearnedModel):
             raise ValueError(
                 f"nonlinear: feature set {params['feature_set']!r} lacks {CATEGORICAL!r}, which "
                 f"stock_id='categorical' needs; add it to the set or use stock_id='drop'"
+            )
+
+    def _check_monotone_constraints(self, params: dict) -> None:
+        """Refuse a bad ``monotone_constraints`` mapping or ``monotone_constraints_method`` at
+        construction, before any data is loaded. Whether each name is a column the fit reads is
+        known only once the features are built (``_monotone_signs``)."""
+        constraints = params["monotone_constraints"]
+        if not isinstance(constraints, Mapping):
+            raise ValueError(
+                f"nonlinear: monotone_constraints must be a mapping of feature name to "
+                f"{MONOTONE_SIGNS}, got {constraints!r}"
+            )
+        for feature, sign in constraints.items():
+            if not isinstance(feature, str):
+                raise ValueError(
+                    f"nonlinear: monotone_constraints keys must be feature names, got {feature!r}"
+                )
+            if isinstance(sign, bool) or not isinstance(sign, int | np.integer):
+                sign = None  # not an integer: no sign, whatever it equals (1.0, True)
+            if sign not in MONOTONE_SIGNS:
+                raise ValueError(
+                    f"nonlinear: monotone_constraints[{feature!r}] must be one of "
+                    f"{MONOTONE_SIGNS}, got {constraints[feature]!r}"
+                )
+        if params["monotone_constraints_method"] not in MONOTONE_METHODS:
+            raise ValueError(
+                f"nonlinear: monotone_constraints_method must be one of {MONOTONE_METHODS}, "
+                f"got {params['monotone_constraints_method']!r}"
+            )
+        constrained = [feature for feature, sign in constraints.items() if sign]
+        if CATEGORICAL in constrained and params["stock_id"] == "categorical":
+            raise ValueError(
+                f"nonlinear: monotone_constraints cannot constrain {CATEGORICAL!r}, a categorical "
+                f"feature under stock_id='categorical' (LightGBM aborts on one)"
+            )
+        if constrained and params["loss"] == "l1":
+            raise ValueError(
+                f"nonlinear: monotone_constraints {constrained} cannot be fitted on loss='l1' "
+                f"(LightGBM refuses them with regression_l1); use loss='mse'"
+            )
+        if constrained and params["linear_tree"]:
+            raise ValueError(
+                f"nonlinear: monotone_constraints {constrained} cannot be used with linear_tree "
+                f"(LightGBM enforces a constraint when it chooses a split, not in a leaf's linear "
+                f"model, so the output would not be monotone)"
             )
 
     @property
@@ -242,6 +311,22 @@ class NonlinearModel(LearnedModel):
             columns = [c for c in columns if c != CATEGORICAL]
         return columns
 
+    def _monotone_signs(self, columns: list[str]) -> list[int] | None:
+        """``monotone_constraints`` as LightGBM's list: the sign of each of ``columns`` in order,
+        0 for one the mapping does not name. None when no sign is set, so that a fit without
+        constraints hands LightGBM no such parameter. A named feature that is not one of the
+        columns -- a typo, or one the feature set or ``stock_id='drop'`` leaves out -- is an
+        error, named, whatever its sign."""
+        constraints = self.params["monotone_constraints"]
+        absent = [feature for feature in constraints if feature not in columns]
+        if absent:
+            raise ValueError(
+                f"nonlinear: monotone_constraints names feature(s) the fit does not train on: "
+                f"{absent}"
+            )
+        signs = [int(constraints.get(column, 0)) for column in columns]
+        return signs if any(signs) else None
+
     def _fit(
         self,
         X_fit: pd.DataFrame,
@@ -262,6 +347,9 @@ class NonlinearModel(LearnedModel):
         columns = self._fit_columns(X_fit.columns)
         if columns != list(X_fit.columns):  # the default fit hands LightGBM the frame itself
             X_fit = X_fit[columns]
+        signs = self._monotone_signs(columns)
+        if signs is not None:
+            params["monotone_constraints"] = signs
         categorical = [CATEGORICAL] if CATEGORICAL in columns else []
         data = lgb.Dataset(X_fit, label=y_fit, categorical_feature=categorical)
         if eval_set is None:

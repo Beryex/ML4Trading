@@ -923,11 +923,19 @@ def test_default_added_parameters_change_nothing(frames, monkeypatch):
         "cat_l2": 10.0,
     }
     piece_wise_linear = {"linear_tree": False, "linear_lambda": 0.0}  # LightGBM 4's defaults
-    assert seen["params"] == {**before, **categorical, **piece_wise_linear}
+    noise_robust = {  # LightGBM 4's defaults of its four noise-robust split options
+        "extra_trees": False,
+        "path_smooth": 0.0,
+        "feature_fraction_bynode": 1.0,
+        "monotone_constraints_method": "basic",
+    }
+    # no constraint: the key itself is left out, not passed empty
+    assert seen["params"] == {**before, **categorical, **piece_wise_linear, **noise_robust}
+    assert "monotone_constraints" not in seen["params"]
     assert seen["dataset_kwargs"]["categorical_feature"] == ["stock_id"]
     assert seen["train_kwargs"] == {"num_boost_round": 100}
 
-    # the same fit without those six keys (LightGBM fills in the same values) predicts the same
+    # the same fit without those ten keys (LightGBM fills in the same values) predicts the same
     data = seen["data"]
     plain = real_train(
         before,
@@ -1261,6 +1269,264 @@ def test_a_saved_linear_tree_fit_predicts_the_same(frames, tmp_path, early_stopp
     assert "[linear_tree: 1]" in loaded.booster.model_to_string()
     assert loaded.feature_names() == artifact.feature_names()
     assert np.array_equal(loaded.predict(X), artifact.predict(X))
+
+
+# ---- noise-robust splits and monotone constraints (LightGBM's extra_trees, path_smooth,
+# feature_fraction_bynode, monotone_constraints, monotone_constraints_method) ----
+
+
+def _model_text(frames, **params):
+    return (
+        _model("nonlinear", **params)
+        .fit_predict_fold(frames["nonlinear"], FIT, JUNE)
+        .artifact.booster.model_to_string()
+    )
+
+
+def test_extra_trees_and_bynode_reach_lightgbm(frames):
+    text = _model_text(
+        frames, extra_trees=True, feature_fraction_bynode=0.7, path_smooth=0.5, min_data_in_leaf=5
+    )
+    assert "[extra_trees: 1]" in text
+    assert "[feature_fraction_bynode: 0.7]" in text
+    assert "[path_smooth: 0.5]" in text
+    default = _model_text(frames, min_data_in_leaf=5)
+    assert "[extra_trees: 0]" in default and "[feature_fraction_bynode: 1]" in default
+    assert "[path_smooth: 0]" in default and "[monotone_constraints_method: basic]" in default
+    # the options are not only recorded: they grow other trees
+    trees = lambda t: t[t.index("Tree=0") : t.index("end of trees")]  # noqa: E731
+    assert trees(text) != trees(default)
+
+
+@pytest.mark.parametrize("method", ["basic", "intermediate", "advanced"])
+def test_monotone_constraints_method_reaches_lightgbm(frames, method):
+    text = _model_text(
+        frames,
+        loss="mse",
+        monotone_constraints={"Return_1d": 1},
+        monotone_constraints_method=method,
+    )
+    assert f"[monotone_constraints_method: {method}]" in text
+
+
+def _monotone_frames(frames):
+    """The frames with a label that is a wave in two features, so that a fit left free is not
+    monotone in either: ``Volatility_5d`` (the constraint +1) and ``Return_1d`` (-1)."""
+    f = frames["nonlinear"]
+
+    def wave(column, cycles):
+        v = f.X[column].to_numpy(float)
+        return np.sin(2 * np.pi * cycles * (v - np.nanmin(v)) / np.ptp(v[np.isfinite(v)]))
+
+    return Frames(
+        f.panel.assign(y=0.01 * wave("Volatility_5d", 2) + 0.01 * wave("Return_1d", 2)), f.X
+    )
+
+
+MONOTONE = {"loss": "mse", "num_leaves": 8, "min_data_in_leaf": 5, "n_estimators": 40}
+SIGNS = {"Volatility_5d": 1, "Return_1d": -1}
+
+
+def _along(artifact, X, column, n=60):
+    """The predictions of ``X``'s rows with ``column`` alone set to each of ``n`` values over its
+    range, one row of the result per base row."""
+    values = X[column].dropna()
+    grid = np.linspace(values.min(), values.max(), n)
+    out = []
+    for _, row in X.iloc[:8].iterrows():
+        probe = pd.DataFrame([row] * n).reset_index(drop=True).astype(X.dtypes.to_dict())
+        probe[column] = grid
+        out.append(artifact.predict(probe))
+    return np.array(out)
+
+
+def test_monotone_constraints_are_aligned_with_the_fit_columns(frames, monkeypatch, tmp_path):
+    # a set in an order of its own: the constraint list follows the fit's columns, not the frame's
+    _feature_sets(
+        monkeypatch, tmp_path, ordered="Volatility_5d\nstock_id\nReturn_1d\nVolume_MA_ratio\n"
+    )
+    f = _monotone_frames(frames)
+    params = {**MONOTONE, "feature_set": "ordered"}
+    artifact = (
+        _model("nonlinear", **params, monotone_constraints=SIGNS)
+        .fit_predict_fold(f, FIT, JUNE)
+        .artifact
+    )
+    assert artifact.feature_names() == ["Volatility_5d", "stock_id", "Return_1d", "Volume_MA_ratio"]
+    text = artifact.booster.model_to_string()
+    assert "\nmonotone_constraints=1 0 -1 0\n" in text  # the booster's own, per column
+    assert "[monotone_constraints: 1,0,-1,0]" in text
+    # monotone in each constrained feature when it alone varies, and by the constraint's sign
+    X = _keyed(f, JUNE)
+    up = _along(artifact, X, "Volatility_5d")
+    down = _along(artifact, X, "Return_1d")
+    assert (np.diff(up, axis=1) >= -1e-12).all() and (np.diff(down, axis=1) <= 1e-12).all()
+    assert np.ptp(up, axis=1).min() > 0 and np.ptp(down, axis=1).min() >= 0
+    # the same fit left free is not monotone in the first (so the check has power)
+    free = _model("nonlinear", **params).fit_predict_fold(f, FIT, JUNE).artifact
+    assert "monotone_constraints=" not in free.booster.model_to_string()
+    steps = np.diff(_along(free, X, "Volatility_5d"), axis=1)
+    assert (steps < -1e-6).any() and (steps > 1e-6).any()
+
+
+def test_monotone_constraints_on_all_columns_follow_the_frame(frames):
+    f = _monotone_frames(frames)
+    artifact = (
+        _model("nonlinear", **MONOTONE, monotone_constraints={"Return_1d": -1, "Weekday": 1})
+        .fit_predict_fold(f, FIT, JUNE)
+        .artifact
+    )
+    names = artifact.feature_names()
+    signs = {"Return_1d": -1, "Weekday": 1}
+    want = " ".join(str(signs.get(name, 0)) for name in names)
+    assert f"\nmonotone_constraints={want}\n" in artifact.booster.model_to_string()
+    assert len(names) == f.X.shape[1] and want.count("-1") == 1
+
+
+def test_zero_signs_pass_no_constraint(frames):
+    # 0 is "unconstrained": a mapping of zeros is the unconstrained fit, to the last bit
+    f = frames["nonlinear"]
+    free = _model("nonlinear").fit_predict_fold(f, FIT, JUNE)
+    zeros = _model("nonlinear", monotone_constraints={"Return_1d": 0, "stock_id": 0})
+    zeroed = zeros.fit_predict_fold(f, FIT, JUNE)
+    assert zeroed.artifact.booster.model_to_string() == free.artifact.booster.model_to_string()
+    pd.testing.assert_frame_equal(free.predictions, zeroed.predictions, check_exact=True)
+
+
+def test_monotone_constraint_on_a_missing_feature_is_refused(frames, monkeypatch, tmp_path):
+    f = frames["nonlinear"]
+    mse = {"loss": "mse", "n_estimators": 5}  # the default l1 refuses any constraint earlier
+    missing = "monotone_constraints.*does not train on.*'{}'"
+    with pytest.raises(ValueError, match=missing.format("Return_1x")):
+        _model(
+            "nonlinear", **mse, monotone_constraints={"Return_1d": -1, "Return_1x": 1}
+        ).fit_predict_fold(f, FIT, JUNE)
+    # a typo is refused whatever its sign, since the sign 0 would hide it
+    with pytest.raises(ValueError, match=missing.format("Return_1x")):
+        _model("nonlinear", **mse, monotone_constraints={"Return_1x": 0}).fit_predict_fold(
+            f, FIT, JUNE
+        )
+    # a real feature the fit does not read: outside its feature set, or the dropped code
+    _feature_sets(monkeypatch, tmp_path, small="stock_id\nReturn_1d\n")
+    with pytest.raises(ValueError, match=missing.format("Weekday")):
+        _model(
+            "nonlinear", **mse, feature_set="small", monotone_constraints={"Weekday": 1}
+        ).fit_predict_fold(f, FIT, JUNE)
+    with pytest.raises(ValueError, match=missing.format("stock_id")):
+        _model(
+            "nonlinear", **mse, stock_id="drop", monotone_constraints={"stock_id": 0}
+        ).fit_predict_fold(f, FIT, JUNE)
+    # the features the fit does train on are fine, set or not
+    _model(
+        "nonlinear", **mse, feature_set="small", monotone_constraints={"Return_1d": 1}
+    ).fit_predict_fold(f, FIT, JUNE)
+
+
+def test_bad_monotone_value_is_refused_before_loading(learned_data, tmp_path, monkeypatch):
+    def no_loading(*args, **kwargs):
+        raise AssertionError("the data was loaded before the model was checked")
+
+    monkeypatch.setattr("ml4trading.train.load_frames", no_loading)
+    for bad in (2, -2, 0.5, 1.0, True, "1", None):
+        with pytest.raises(ValueError, match="monotone_constraints.*Return_1d"):
+            _model("nonlinear", monotone_constraints={"Return_1d": bad})
+    for bad in ([("Return_1d", 1)], ["Return_1d"], "Return_1d", 1, None):
+        with pytest.raises(ValueError, match="monotone_constraints must be a mapping"):
+            _model("nonlinear", monotone_constraints=bad)
+    with pytest.raises(ValueError, match="monotone_constraints.*feature names"):
+        _model("nonlinear", monotone_constraints={1: -1})
+    with pytest.raises(ValueError, match="monotone_constraints.*Return_1d"):
+        train(
+            "nonlinear",
+            tmp_path / "run",
+            learned_data,
+            overrides={"model.monotone_constraints": {"Return_1d": 2}},
+        )
+    with pytest.raises(ValueError, match="monotone_constraints.*Return_1d"):  # one grid candidate
+        train(
+            "nonlinear",
+            tmp_path / "run",
+            learned_data,
+            grid={"model.monotone_constraints": [{}, {"Return_1d": 2}]},
+        )
+    for good in ({}, {"Return_1d": -1}, {"Return_1d": 0, "Weekday": 1}):
+        _model("nonlinear", loss="mse", monotone_constraints=good)
+    # the method is one of LightGBM's three (it takes any string without complaint)
+    with pytest.raises(ValueError, match="monotone_constraints_method.*'quick'"):
+        _model("nonlinear", monotone_constraints_method="quick")
+
+
+def test_monotone_constraints_cannot_cover_unsupported_fits(learned_data, tmp_path, monkeypatch):
+    def no_loading(*args, **kwargs):
+        raise AssertionError("the data was loaded before the model was checked")
+
+    monkeypatch.setattr("ml4trading.train.load_frames", no_loading)
+    # LightGBM refuses a constraint on regression_l1, the default loss, once the fit starts
+    with pytest.raises(ValueError, match="monotone_constraints.*loss='l1'"):
+        _model("nonlinear", monotone_constraints={"Return_1d": 1})
+    with pytest.raises(ValueError, match="monotone_constraints.*loss='l1'"):
+        train(
+            "nonlinear",
+            tmp_path / "run",
+            learned_data,
+            overrides={"model.monotone_constraints": {"Return_1d": 1}},
+        )
+    _model("nonlinear", loss="mse", monotone_constraints={"Return_1d": 1})
+    _model("nonlinear", loss="l1", monotone_constraints={"Return_1d": 0})  # no constraint
+    # LightGBM aborts the process on a constraint on a categorical feature
+    with pytest.raises(ValueError, match="stock_id.*categorical"):
+        _model("nonlinear", loss="mse", monotone_constraints={"stock_id": 1})
+    _model("nonlinear", stock_id="drop", monotone_constraints={})
+    _model("nonlinear", monotone_constraints={"stock_id": 0})
+    # LightGBM enforces the constraint when it chooses the splits, not in a leaf's linear model
+    with pytest.raises(ValueError, match="monotone_constraints.*linear_tree"):
+        _model("nonlinear", loss="mse", linear_tree=True, monotone_constraints={"Return_1d": 1})
+    _model("nonlinear", loss="mse", linear_tree=True, monotone_constraints={"Return_1d": 0})
+
+
+def test_monotone_constraints_are_a_nonlinear_parameter_only():
+    for name in ("extra_trees", "path_smooth", "feature_fraction_bynode", "monotone_constraints"):
+        with pytest.raises(ValueError, match=f"unknown parameter.*{name}"):
+            _model("linear", **{name: 0})
+
+
+def test_monotone_constraints_reach_the_run_files(learned_data, tmp_path, monkeypatch):
+    import sys
+
+    from ml4trading import train as train_module
+    from ml4trading.config import RunConfig
+
+    # --set parses its value as YAML: a flow mapping is a dict, of strings to integers
+    seen = {}
+    monkeypatch.setattr(train_module, "train", lambda *a, **kw: seen.update(kw))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["train", "--method", "nonlinear", "--out", str(tmp_path / "x"), "--set"]
+        + ["model.monotone_constraints={Return_1d: -1, Weekday: +1}"],
+    )
+    train_module.main()
+    constraints = {"Return_1d": -1, "Weekday": 1}
+    assert seen["overrides"] == {"model.monotone_constraints": constraints}
+
+    run = train(
+        "nonlinear",
+        tmp_path / "run",
+        learned_data,
+        grid={"model.monotone_constraints": [{}, constraints]},
+        overrides={**seen["overrides"], **SHORT_FOLDS, "model.loss": "mse"},
+    )
+    meta = json.loads((run / "run.json").read_text())
+    assert meta["config"]["model"]["monotone_constraints"] == constraints
+    assert meta["grid"] == {"model.monotone_constraints": [{}, constraints]}
+    assert RunConfig.from_dict(meta["config"]).model["monotone_constraints"] == constraints
+    fold = json.loads((run / "folds" / "F2021-07" / "fold.json").read_text())
+    assert fold["model_params"]["monotone_constraints"] in ({}, constraints)
+    assert len(fold["candidate_val_net_sharpe"]) == 2
+    # the saved booster of the constrained candidate carries the constraints
+    text = (run / "folds" / "F2021-07" / "model" / "model.txt").read_text()
+    assert ("monotone_constraints=" in text) == (fold["chosen"] == 1)
+    assert backtest(run, learned_data)["n_periods"] > 0
 
 
 # ---- horizon labels (ml4trading/models/learned/horizon.py) ----

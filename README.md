@@ -205,6 +205,27 @@ universe decides what is traded.
     Trees", IJCAI; LightGBM's `linear_tree`, at its defaults). LightGBM fits it on `mse` only, so
     `loss=l1` with it is refused. A row missing a feature its leaf uses gets the leaf's constant
     output.
+  - `extra_trees` (false), `path_smooth` (0.0) and `feature_fraction_bynode` (1.0): LightGBM's
+    noise-robust split options, at its defaults ([Parameters](https://lightgbm.readthedocs.io/en/stable/Parameters.html),
+    "Learning Control Parameters"). With `extra_trees=true` each node checks one randomly drawn
+    threshold per feature (Geurts, Ernst & Wehenkel 2006, "Extremely randomized trees"); a
+    `path_smooth` above 0 smooths the tree nodes and needs `min_data_in_leaf` of at least 2; a
+    `feature_fraction_bynode` below 1 draws that fraction of the features again at each node, on
+    top of `feature_fraction`.
+  - `monotone_constraints` (`{}`) and `monotone_constraints_method` (`basic`): a mapping of
+    feature name to `-1`, `0` or `1` makes the fitted output non-increasing, free or
+    non-decreasing in that feature (LightGBM's `monotone_constraints`, same section, translated
+    into its per-column list for each fit; an unnamed column is free, and a mapping with no sign
+    set passes LightGBM nothing). `monotone_constraints_method` is `basic`, `intermediate` or
+    `advanced` and applies only to a mapping with a sign set; LightGBM 4.7 falls back to `basic`
+    under `feature_fraction_bynode` below 1, which the saved model's parameter list shows. From
+    the command line the mapping is YAML: `--set 'model.monotone_constraints={Return_1d: -1}'`. A
+    name the fit does not train on (a typo, or a column outside the `feature_set`) is refused by
+    name, at the first fit. A sign other than `-1`, `0` or `1` is refused at construction, before
+    any data loads, and so are: a constraint on `stock_id` while it is categorical (LightGBM aborts
+    on one), a constraint with `linear_tree` (LightGBM enforces it when it chooses a split, not in
+    a leaf's linear model) and a constraint with the default `loss=l1` (LightGBM refuses
+    `regression_l1` with one), so `--set model.loss=mse` goes along with it.
   - `loss` (`l1` default, ML4Investment's `TRAIN_OBJECTIVE`; or `mse`), `n_estimators` (100) and
     LightGBM's `num_leaves`, `min_data_in_leaf`, `learning_rate`, `feature_fraction`,
     `bagging_fraction`, `bagging_freq`, `lambda_l1`, `lambda_l2`, `max_depth`,

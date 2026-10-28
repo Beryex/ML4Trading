@@ -227,6 +227,23 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             # loss "mse"
             "linear_tree": False,
             "linear_lambda": 0.0,
+            # noise-robust splits, all under "Learning Control Parameters" and all at LightGBM 4's
+            # defaults: extra_trees (off; Geurts, Ernst & Wehenkel 2006, "Extremely randomized
+            # trees": LightGBM then checks one randomly drawn threshold per feature at a node),
+            # path_smooth (0.0: no smoothing applied to tree nodes, which guards leaves with few
+            # rows; above 0 it needs min_data_in_leaf >= 2), feature_fraction_bynode (1.0: every
+            # feature is a candidate at each node; below 1 it multiplies feature_fraction)
+            "extra_trees": False,
+            "path_smooth": 0.0,
+            "feature_fraction_bynode": 1.0,
+            # a feature -> sign (-1, 0 or +1) mapping: the booster's output is non-increasing /
+            # unconstrained / non-decreasing in that feature. LightGBM's monotone_constraints
+            # ("Learning Control Parameters"; default none), translated per fit to its per-column
+            # list; {} passes nothing. monotone_constraints_method (basic, intermediate or
+            # advanced; "Learning Control Parameters", default basic) applies only to a non-empty
+            # mapping
+            "monotone_constraints": {},
+            "monotone_constraints_method": "basic",
         },
     },
 }
