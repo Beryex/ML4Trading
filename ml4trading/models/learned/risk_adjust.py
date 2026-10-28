@@ -109,8 +109,7 @@ def scale_predictions(
 def prediction_multiplier(sigma: np.ndarray, period: np.ndarray, risk_adjust: str) -> np.ndarray:
     """What ``scale_predictions`` multiplies each row's raw output by: the row's own ``sigma``
     (``vol_return``), the median sigma of its period's rows that have one (``vol``; NaN for a row
-    without its own), or 1 (``none``). The scored validation rows divide it out again to get back
-    to the fit's units."""
+    without its own), or 1 (``none``)."""
     _check(risk_adjust)
     if risk_adjust == "none":
         return np.ones(len(sigma))

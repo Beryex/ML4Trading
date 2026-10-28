@@ -437,7 +437,6 @@ def test_none_is_bit_identical(frames, method, monkeypatch):
 
     # "none" computes no sigma, whatever the window: it is the code that was there before
     monkeypatch.setattr(risk_adjust_mod, "trailing_volatility", forbidden)
-    monkeypatch.setattr("ml4trading.train.trailing_volatility", forbidden)
     for params in ({"risk_adjust": "none"}, {"risk_adjust": "none", "vol_window": 21}):
         again = _model(method, **params).fit_predict_fold(f, FIT, JUNE)
         pd.testing.assert_frame_equal(default.predictions, again.predictions, check_exact=True)
@@ -450,7 +449,7 @@ def test_none_is_bit_identical(frames, method, monkeypatch):
     periods = sorted(default.predictions["period"].unique())
     scored = _scored_val(default, default.predictions, f.panel, periods)
     pd.testing.assert_series_equal(scored["label"], scored["y"], check_names=False)
-    assert _fit_units(default, scored, f.panel) is None
+    assert _fit_units(default, scored) is None
 
 
 @pytest.mark.parametrize("method", METHODS)
@@ -565,7 +564,7 @@ def test_the_validation_r2_is_in_the_fits_units(frames, method, scale):
     result = _model(method, risk_adjust=scale).fit_predict_fold(f, FIT, JUNE)
     periods = sorted(result.predictions["period"].unique())
     scored = _scored_val(result, result.predictions, f.panel, periods)
-    in_fit_units = _fit_units(result, scored, f.panel)
+    in_fit_units = _fit_units(result, scored)
     z = result.artifact.predict(_scored_features(f, scored))
     assert np.allclose(in_fit_units, z, rtol=1e-9, atol=1e-12)
     r2 = _val_r2(result, scored, in_fit_units)
@@ -574,9 +573,7 @@ def test_the_validation_r2_is_in_the_fits_units(frames, method, scale):
     )
     assert _val_r2(result, scored) != pytest.approx(r2)  # the returns would be a unit mismatch
     plain = _model(method).fit_predict_fold(f, FIT, JUNE)
-    assert (
-        _fit_units(plain, _scored_val(plain, plain.predictions, f.panel, periods), f.panel) is None
-    )
+    assert _fit_units(plain, _scored_val(plain, plain.predictions, f.panel, periods)) is None
 
 
 def test_dispersion_reads_the_fits_units_when_given():

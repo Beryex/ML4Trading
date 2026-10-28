@@ -67,11 +67,7 @@ from ml4trading.models import FoldResult, Frames, get_model
 from ml4trading.models.base import empty_predictions
 from ml4trading.models.learned.horizon import window_labels
 from ml4trading.models.learned.losses import oos_r2
-from ml4trading.models.learned.risk_adjust import (
-    prediction_multiplier,
-    target_volatility,
-    trailing_volatility,
-)
+from ml4trading.models.learned.risk_adjust import target_volatility
 from ml4trading.pipeline import (
     benchmark_returns,
     load_daily_inputs,
@@ -146,22 +142,20 @@ def _scored_features(frames: Frames, scored: pd.DataFrame) -> pd.DataFrame:
     return frames.X.iloc[keys.get_indexer(wanted)].set_axis(wanted)
 
 
-def _fit_units(
-    result: FoldResult | None, scored: pd.DataFrame, panel: pd.DataFrame
-) -> np.ndarray | None:
+def _fit_units(result: FoldResult | None, scored: pd.DataFrame) -> np.ndarray | None:
     """The scored rows' predictions in the units the fit trained on, or None where those are the
-    predictions themselves. A volatility-scaled fit (``risk_adjust``) hands the trader its output
-    times a multiplier, a return; its label and baseline stay per unit of volatility, so what is
-    compared with them -- the R², the dispersion -- divides the multiplier out again. The
-    multiplier is rebuilt from the panel as the prediction built it: a period's median is over
-    every pool row of the period, which is what the fit predicted."""
-    if result is None or result.risk_adjust == "none":
+    predictions themselves. A fit that scales its output to returns (``risk_adjust``) or smooths
+    it over recent rows (``smooth_halflife``) hands the trader something else than the model's
+    own output; the label and the baseline stay in the fit's units, so what is compared with
+    them -- the R², the dispersion -- reads ``FoldResult.fit_predictions`` instead, looked up by
+    (period, symbol) among the fold's ``predictions`` (the scored rows are a subset of them)."""
+    if result is None or result.fit_predictions is None:
         return None
-    sigma = trailing_volatility(panel, result.vol_window)
-    multiplier = prediction_multiplier(sigma, panel["period"].to_numpy(), result.risk_adjust)
-    keys = pd.MultiIndex.from_arrays([panel["period"], panel["symbol"]])
-    at = keys.get_indexer(pd.MultiIndex.from_frame(scored[["period", "symbol"]]))
-    return scored["prediction"].to_numpy(dtype=float) / multiplier[at]
+    made = pd.MultiIndex.from_frame(result.predictions[["period", "symbol"]])
+    at = made.get_indexer(pd.MultiIndex.from_frame(scored[["period", "symbol"]]))
+    if (at < 0).any():
+        raise ValueError("a scored row has no prediction in the fold's result")
+    return result.fit_predictions.to_numpy(dtype=float)[at]
 
 
 def _val_r2(
@@ -366,7 +360,7 @@ def train(
                 preds, panel, periods, cand, benchmark=benchmark, daily_inputs=daily_inputs
             )
             scored = _scored_val(result, preds, panel, periods)
-            fit_prediction = _fit_units(result, scored, panel)
+            fit_prediction = _fit_units(result, scored)
             scores.append(float(metrics.get("net_sharpe", 0.0)))
             r2s.append(_val_r2(result, scored, fit_prediction))
             if kept is None or scores[-1] > scores[kept.index]:  # the first best wins

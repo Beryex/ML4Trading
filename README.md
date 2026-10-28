@@ -128,6 +128,17 @@ universe decides what is traded.
   window has no volatility: it is not fitted on, and predicts nothing. The validation label, the
   early-stopping set and the R² are per unit of volatility. It is a fit-time option, so a grid
   may search it.
+- **Prediction smoothing** (`--set model.smooth_halflife=3`, in sessions; both models, `0` =
+  off by default): a one-session forecast moves with the day's noise, so the book trades names in
+  and out. With a half-life `H` the traded prediction is, last of all -- after any volatility
+  scaling -- each stock's exponential average of its own predictions, `s = (1 - a) s_prev + a x`
+  with `a = 1 - 0.5 ** (1 / H)`, seeded at its first prediction. The fold predicts `3 * ceil(H)`
+  sessions before its window as well, so the average has history at the window's first session,
+  and returns only the window. The average runs over the stock's own consecutive rows: a session
+  it did not trade is a row it does not have, and a stock that starts inside the window is seeded
+  there. The fit, its early stopping and the R² stay on the model's own output, before the
+  scaling and the average; the book, the IC and the cost gate read the smoothed predictions. It
+  is a prediction-time option, so a grid may search it.
 - **`linear`**: an elastic net on the standardized features. A missing value is replaced by the
   median of its feature over the same session's stocks; the penalty is a fraction `alpha_ratio`
   of the smallest one that zeroes every coefficient (scikit-learn's `ElasticNetCV` convention).

@@ -72,7 +72,12 @@ class FoldResult:
     (``ml4trading.models.learned.horizon``; 1 and ``sum``, one period's return, for a model with
     no horizon): the validation scoring builds its labels the same way. So do ``risk_adjust``
     and ``vol_window`` (``ml4trading.models.learned.risk_adjust``; ``none`` and 63 for a model
-    that does not scale its target): the label is then per unit of volatility."""
+    that does not scale its target): the label is then per unit of volatility.
+    ``fit_predictions`` is what the validation scoring compares with that label: the fit's own
+    output for each row of ``predictions`` (same order, same index), before the volatility
+    scaling and the smoothing (``ml4trading.models.learned.smoothing``) that make the traded
+    ``prediction``. It is None where the two are the same numbers: a model that does neither,
+    and every fit-free model."""
 
     predictions: pd.DataFrame
     artifact: object | None
@@ -87,6 +92,7 @@ class FoldResult:
     horizon_scale: str = "sum"
     risk_adjust: str = "none"
     vol_window: int = 63
+    fit_predictions: pd.Series | None = None
 
 
 class Model(ABC):

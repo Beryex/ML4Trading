@@ -19,6 +19,12 @@ to the units of a return, so the trader ranks and weights by forecast risk-adjus
 rows without a volatility are left out of the fit, of the early-stopping set and of the scoring,
 and predict NaN.
 
+With ``smooth_halflife`` > 0 the traded prediction is, last of all, each symbol's exponential
+average of those predictions over its recent rows (``ml4trading.models.learned.smoothing``). The
+fold predicts a lookback of sessions before the predict window for it, scaled like the window's,
+and returns only the window. The fit, its early stopping and the validation R² stay on the model's
+own output, before the scaling and the average (``FoldResult.fit_predictions``).
+
 The features are ML4Investment's (``ml4trading.features.build_features``); with ``extra_features``
 the slow cross-sectional features of ``ml4trading.features.slow`` are joined on after them, before
 the model's own transform of the features, so a transform sees the new columns too. The frames are
@@ -53,6 +59,7 @@ from ml4trading.models.learned.risk_adjust import (
     target_volatility,
     valid_vol_window,
 )
+from ml4trading.models.learned.smoothing import lookback_start, smooth_predictions
 
 
 @dataclass(frozen=True)
@@ -107,7 +114,8 @@ class LearnedModel(Model):
     #: ``extra_features`` adds the slow features to the frames (``build_frames``);
     #: ``risk_adjust`` and ``vol_window`` scale the target by the symbol's trailing volatility
     #: (``ml4trading.models.learned.risk_adjust``);
-    #: ``smooth_halflife`` is only checked here, nothing reads it yet.
+    #: ``smooth_halflife`` averages each symbol's traded predictions over its recent rows
+    #: (``ml4trading.models.learned.smoothing``).
     SHARED_PARAMS: ClassVar[tuple[str, ...]] = (
         "horizon",
         "horizon_scale",
@@ -200,6 +208,12 @@ class LearnedModel(Model):
     def horizon_scale(self) -> str:
         """``sum`` or ``mean`` (``ml4trading.models.learned.horizon.HORIZON_SCALES``)."""
         return str(self.params.get("horizon_scale", "sum"))
+
+    @property
+    def smooth_halflife(self) -> float:
+        """The half-life, in sessions, of the average the traded predictions are smoothed by; 0
+        is off (``ml4trading.models.learned.smoothing``)."""
+        return float(self.params.get("smooth_halflife", 0))
 
     @property
     def risk_adjust(self) -> str:
@@ -354,21 +368,33 @@ class LearnedModel(Model):
         )
 
         rows = rows_in(panel, predict_window)
+        halflife = self.smooth_halflife
+        if halflife > 0 and len(rows):  # the average also reads the rows just before the window
+            start = lookback_start(panel, rows["session"].min(), halflife)
+            rows = rows_in(panel, (start, predict_window[1]))
         at = panel.index.get_indexer(rows.index)
-        predicted = artifact.predict(X.iloc[at])
+        predicted = fit_units = artifact.predict(X.iloc[at])
         if sigma is not None:  # the model's output is in the fit's units; the trader reads returns
             predicted = scale_predictions(
                 predicted, sigma[at], rows["period"].to_numpy(), self.risk_adjust
             )
-        out = pd.DataFrame(
-            {
-                "period": rows["period"].to_numpy(),
-                "symbol": rows["symbol"].to_numpy(),
-                "prediction": predicted,
-            }
-        )
+        if halflife > 0:  # last of all: the traded predictions, averaged over the symbol's rows
+            predicted = smooth_predictions(predicted, rows, halflife)
+            in_window = (rows["session"] >= pd.Timestamp(predict_window[0])).to_numpy()
+            rows, predicted, fit_units = rows[in_window], predicted[in_window], fit_units[in_window]
+        columns = {
+            "period": rows["period"].to_numpy(),
+            "symbol": rows["symbol"].to_numpy(),
+            "prediction": predicted,
+        }
+        # unless the traded predictions are the model's own output, keep that output beside them
+        keep_fit_units = sigma is not None or halflife > 0
+        if keep_fit_units:
+            columns["fit_prediction"] = fit_units
+        out = pd.DataFrame(columns).dropna(subset=["prediction"]).reset_index(drop=True)
+        fit_predictions = out.pop("fit_prediction") if keep_fit_units else None
         return FoldResult(
-            out.dropna(subset=["prediction"]).reset_index(drop=True),
+            out,
             artifact,
             int(fit.sum()),
             self.loss,
@@ -381,4 +407,5 @@ class LearnedModel(Model):
             self.horizon_scale,
             self.risk_adjust,
             self.vol_window,
+            fit_predictions,
         )

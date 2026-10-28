@@ -143,8 +143,9 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             # the label is the sum of the horizon's returns; "mean": their average, per-session
             # units (the units a cost gate sees: Gârleanu & Pedersen 2013)
             "horizon_scale": "sum",
-            # checked by the model and read by nothing yet; today's behaviour is 0 (sessions;
-            # 0 = off)
+            # the half-life, in sessions, of the exponential average the traded predictions are
+            # smoothed by over each symbol's recent rows; 0 = off, the predictions as they are
+            # (ml4trading/models/learned/smoothing.py)
             "smooth_halflife": 0,
             # False: ML4Investment's features alone; True adds the slow cross-sectional features
             # from the literature (ml4trading/features/slow.py). Fixed for a run: it cannot be
@@ -182,8 +183,9 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             # the label is the sum of the horizon's returns; "mean": their average, per-session
             # units (the units a cost gate sees: Gârleanu & Pedersen 2013)
             "horizon_scale": "sum",
-            # checked by the model and read by nothing yet; today's behaviour is 0 (sessions;
-            # 0 = off)
+            # the half-life, in sessions, of the exponential average the traded predictions are
+            # smoothed by over each symbol's recent rows; 0 = off, the predictions as they are
+            # (ml4trading/models/learned/smoothing.py)
             "smooth_halflife": 0,
             # False: ML4Investment's features alone; True adds the slow cross-sectional features
             # from the literature (ml4trading/features/slow.py). Fixed for a run: it cannot be
