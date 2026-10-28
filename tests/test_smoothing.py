@@ -17,6 +17,7 @@ from ml4trading.models.learned import base as learned_base
 from ml4trading.models.learned.base import EarlyStop, LearnedModel
 from ml4trading.models.learned.losses import oos_r2
 from ml4trading.models.learned.risk_adjust import prediction_multiplier, trailing_volatility
+from ml4trading.models.learned.smoothing import smooth_predictions
 from ml4trading.pipeline import load_frames
 from ml4trading.testing import assert_causal
 from ml4trading.train import train
@@ -204,6 +205,41 @@ def test_a_window_without_sessions_has_nothing_to_smooth(frames):
         frames["linear"], FIT, after_the_data
     )
     assert result.predictions.empty and result.artifact is not None
+
+
+# ---- a missing prediction ----
+
+
+def test_a_missing_prediction_stays_missing():
+    # a row with no prediction (or an infinite one) is not traded that period: the average must
+    # not hand it the last value it carried, which pandas' ewm would
+    days = pd.bdate_range("2021-06-01", periods=7)
+    rows = pd.concat(
+        [pd.DataFrame({"period": days, "symbol": symbol}) for symbol in ("A", "B")],
+        ignore_index=True,
+    )
+    nan, inf = np.nan, np.inf
+    a = np.array([nan, 1.0, 2.0, nan, 4.0, inf, 6.0])  # leading and interior NaN, an infinity
+    b = np.array([0.5, 1.5, -1.0, 2.0, 0.0, 1.0, 3.0])
+    halflife = 3
+    alpha = 1.0 - 0.5 ** (1.0 / halflife)
+    got = smooth_predictions(np.concatenate([a, b]), rows, halflife)
+    got_a, got_b = got[:7], got[7:]
+
+    assert np.isnan(got_a[[0, 3, 5]]).all()  # missing in, missing out
+    assert np.isfinite(got_a[[1, 2, 4, 6]]).all()
+    # seeded at the first finite value, not at the leading NaN
+    assert got_a[1] == pytest.approx(1.0, abs=1e-15)
+    assert got_a[2] == pytest.approx((1 - alpha) * 1.0 + alpha * 2.0, abs=1e-15)
+    # a missing row is a session that passed: the older average weighs (1 - alpha) once more
+    old = (1 - alpha) ** 2
+    after_nan = (old * got_a[2] + alpha * 4.0) / (old + alpha)
+    assert got_a[4] == pytest.approx(after_nan, abs=1e-12)
+    assert abs(got_a[4] - ((1 - alpha) * got_a[2] + alpha * 4.0)) > 1e-6  # not a plain step
+    after_inf = (old * got_a[4] + alpha * 6.0) / (old + alpha)  # an infinity is missing too
+    assert got_a[6] == pytest.approx(after_inf, abs=1e-12)
+    # the other symbol is a plain average, untouched by A's missing rows
+    assert np.allclose(got_b, _hand_ema(rows.iloc[7:], b, halflife), rtol=0, atol=1e-12)
 
 
 # ---- off ----
