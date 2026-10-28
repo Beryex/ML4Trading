@@ -1108,6 +1108,8 @@ SHARED_DEFAULTS = {
     "horizon_scale": "sum",
     "smooth_halflife": 0,
     "extra_features": False,
+    "risk_adjust": "none",
+    "vol_window": 63,
 }
 
 
@@ -1135,7 +1137,7 @@ def _next_open_rule(panel, end):
 def test_the_shared_parameters_default_to_todays_behaviour(method):
     model = config.METHOD_DEFAULTS[method]["model"]
     assert {k: model[k] for k in SHARED_DEFAULTS} == SHARED_DEFAULTS
-    for key in SHARED_DEFAULTS:  # all four are required of a learned model
+    for key in SHARED_DEFAULTS:  # all are required of a learned model
         short = {k: v for k, v in config.resolve(method).model.items() if k != key}
         with pytest.raises(ValueError, match=f"missing parameter.*{key}"):
             get_model(method)(**short)

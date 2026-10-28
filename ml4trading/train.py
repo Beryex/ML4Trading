@@ -65,6 +65,11 @@ from ml4trading.models import FoldResult, Frames, get_model
 from ml4trading.models.base import empty_predictions
 from ml4trading.models.learned.horizon import window_labels
 from ml4trading.models.learned.losses import oos_r2
+from ml4trading.models.learned.risk_adjust import (
+    prediction_multiplier,
+    target_volatility,
+    trailing_volatility,
+)
 from ml4trading.pipeline import (
     benchmark_returns,
     load_daily_inputs,
@@ -118,9 +123,11 @@ def _scored_val(
     following the last of ``periods`` (with ``horizon`` > 1, the last periods')."""
     transform = None if result is None else result.label_transform
     horizon, scale = (1, "sum") if result is None else (result.horizon, result.horizon_scale)
+    scaling = ("none", 63) if result is None else (result.risk_adjust, result.vol_window)
+    sigma = target_volatility(panel, *scaling)
     in_scope = panel["period"].isin(set(periods)).to_numpy()
     pooled = in_scope & np.isfinite(panel["y"].to_numpy(dtype=float))
-    label = window_labels(panel, periods, horizon, scale, transform)[pooled]
+    label = window_labels(panel, periods, horizon, scale, transform, sigma)[pooled]
     scored = preds[preds["period"].isin(set(periods))].merge(
         panel[pooled][["period", "symbol", "y", "open_px"]].assign(label=label),
         on=["period", "symbol"],
@@ -137,12 +144,35 @@ def _scored_features(frames: Frames, scored: pd.DataFrame) -> pd.DataFrame:
     return frames.X.iloc[keys.get_indexer(wanted)].set_axis(wanted)
 
 
-def _val_r2(result: FoldResult | None, scored: pd.DataFrame) -> float | None:
+def _fit_units(
+    result: FoldResult | None, scored: pd.DataFrame, panel: pd.DataFrame
+) -> np.ndarray | None:
+    """The scored rows' predictions in the units the fit trained on, or None where those are the
+    predictions themselves. A volatility-scaled fit (``risk_adjust``) hands the trader its output
+    times a multiplier, a return; its label and baseline stay per unit of volatility, so what is
+    compared with them -- the R², the dispersion -- divides the multiplier out again. The
+    multiplier is rebuilt from the panel as the prediction built it: a period's median is over
+    every pool row of the period, which is what the fit predicted."""
+    if result is None or result.risk_adjust == "none":
+        return None
+    sigma = trailing_volatility(panel, result.vol_window)
+    multiplier = prediction_multiplier(sigma, panel["period"].to_numpy(), result.risk_adjust)
+    keys = pd.MultiIndex.from_arrays([panel["period"], panel["symbol"]])
+    at = keys.get_indexer(pd.MultiIndex.from_frame(scored[["period", "symbol"]]))
+    return scored["prediction"].to_numpy(dtype=float) / multiplier[at]
+
+
+def _val_r2(
+    result: FoldResult | None, scored: pd.DataFrame, fit_prediction: np.ndarray | None = None
+) -> float | None:
     """The out-of-sample R² of the scored rows' predictions against the fit's baseline, under
-    the fit's loss, over the rows with a label; None for a model that fits no loss."""
+    the fit's loss, over the rows with a label; None for a model that fits no loss.
+    ``fit_prediction`` (``_fit_units``) stands for the predictions where they are not in the
+    fit's units."""
     if result is None or result.loss is None:
         return None
-    label, prediction = scored["label"].to_numpy(dtype=float), scored["prediction"].to_numpy()
+    label = scored["label"].to_numpy(dtype=float)
+    prediction = scored["prediction"].to_numpy() if fit_prediction is None else fit_prediction
     known = np.isfinite(label)
     return oos_r2(label[known], prediction[known], result.baseline_prediction, result.loss)
 
@@ -165,6 +195,7 @@ class _Kept(NamedTuple):
     cfg: RunConfig
     result: FoldResult | None
     scored: pd.DataFrame
+    fit_prediction: np.ndarray | None
     book: pd.DataFrame
     positions: pd.DataFrame
     metrics: dict
@@ -318,10 +349,11 @@ def train(
                 preds, panel, periods, cand, benchmark=benchmark, daily_inputs=daily_inputs
             )
             scored = _scored_val(result, preds, panel, periods)
+            fit_prediction = _fit_units(result, scored, panel)
             scores.append(float(metrics.get("net_sharpe", 0.0)))
-            r2s.append(_val_r2(result, scored))
+            r2s.append(_val_r2(result, scored, fit_prediction))
             if kept is None or scores[-1] > scores[kept.index]:  # the first best wins
-                kept = _Kept(index, cand, result, scored, book, positions, metrics)
+                kept = _Kept(index, cand, result, scored, fit_prediction, book, positions, metrics)
         best, chosen = kept.index, kept.cfg
         fit_end = embargoed_end(fold.deploy[1], sessions, embargo)
         universe, result, preds = _fit_predict(
@@ -345,6 +377,7 @@ def train(
                 kept.metrics,
                 chosen,
                 None if kept.result is None else kept.result.fit_label_mean,
+                kept.fit_prediction,
             ),
         }
         if hpo_record is not None:

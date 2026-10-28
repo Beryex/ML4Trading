@@ -199,12 +199,19 @@ def gate_stats(scored: pd.DataFrame, book: pd.DataFrame, cfg: RunConfig) -> dict
     return out
 
 
-def dispersion(scored: pd.DataFrame) -> dict:
+def dispersion(scored: pd.DataFrame, fit_prediction: np.ndarray | None = None) -> dict:
     """The median over periods of the cross-sectional std (ddof 0) of the prediction and of the
-    label -- how far apart the model spreads its calls next to how far apart the outcomes are."""
+    label -- how far apart the model spreads its calls next to how far apart the outcomes are.
+    ``fit_prediction``, row-aligned with ``scored``, stands for the prediction where it is not in
+    the label's units (a volatility-scaled fit's)."""
     out: dict = {}
-    for key, column in (("pred_xs_std", "prediction"), ("label_xs_std", "label")):
-        values = scored[column].astype(float)
+    prediction = (
+        scored["prediction"]
+        if fit_prediction is None
+        else pd.Series(fit_prediction, index=scored.index)
+    )
+    for key, column in (("pred_xs_std", prediction), ("label_xs_std", scored["label"])):
+        values = column.astype(float)
         values = values.where(np.isfinite(values))
         median = values.groupby(scored["period"]).std(ddof=0).median()
         out[key] = None if np.isnan(median) else float(median)
@@ -229,18 +236,24 @@ def validation_diagnostics(
     metrics: dict,
     cfg: RunConfig,
     fit_label_mean: float | None,
+    fit_prediction: np.ndarray | None = None,
 ) -> dict:
     """Everything above in one flat dict, plus the book's headline ``metrics`` (None when
     absent) and ``r2_mse``: the out-of-sample R² of the predictions against the fit's mean label
     under squared error, over the rows with a finite label and prediction. Every NaN is None, so
-    the dict is JSON-safe."""
+    the dict is JSON-safe. ``fit_prediction`` (``train._fit_units``) is the predictions in the
+    label's units where the traded ones are not; ``r2_mse`` and the dispersion read it, the rest
+    the traded predictions."""
     out: dict = {k: metrics.get(k) for k in _METRIC_KEYS}
     out.update(ic_summary(period_ic(scored)))
     out.update(leg_pnl(positions))
     out.update(exposure_stats(positions, book))
     out.update(gate_stats(scored, book, cfg))
-    out.update(dispersion(scored))
-    label, prediction = scored["label"].to_numpy(float), scored["prediction"].to_numpy(float)
+    out.update(dispersion(scored, fit_prediction))
+    label = scored["label"].to_numpy(float)
+    prediction = np.asarray(
+        scored["prediction"] if fit_prediction is None else fit_prediction, dtype=float
+    )
     ok = np.isfinite(label) & np.isfinite(prediction)
     out["r2_mse"] = oos_r2(label[ok], prediction[ok], fit_label_mean, "mse")
     return _json_safe(out)

@@ -13,6 +13,12 @@ The label is the horizon label (``ml4trading.models.learned.horizon``): the retu
 the rows whose label is realized by the first session after its window, and so does the
 early-stopping set after the last of its periods.
 
+With ``risk_adjust`` ``vol`` or ``vol_return`` the fit trains on that label divided by the row's
+trailing volatility (``ml4trading.models.learned.risk_adjust``) and the prediction is scaled back
+to the units of a return, so the trader ranks and weights by forecast risk-adjusted return. The
+rows without a volatility are left out of the fit, of the early-stopping set and of the scoring,
+and predict NaN.
+
 The features are ML4Investment's (``ml4trading.features.build_features``); with ``extra_features``
 the slow cross-sectional features of ``ml4trading.features.slow`` are joined on after them, before
 the model's own transform of the features, so a transform sees the new columns too. The frames are
@@ -40,6 +46,13 @@ from ml4trading.models.learned.horizon import (
 )
 from ml4trading.models.learned.labels import fit_label_transform
 from ml4trading.models.learned.losses import baseline_prediction
+from ml4trading.models.learned.risk_adjust import (
+    MIN_VOL_OBSERVATIONS,
+    RISK_ADJUSTS,
+    scale_predictions,
+    target_volatility,
+    valid_vol_window,
+)
 
 
 @dataclass(frozen=True)
@@ -92,12 +105,16 @@ class LearnedModel(Model):
     #: The keys every learned method takes, which its ``PARAMS`` includes: ``horizon`` and
     #: ``horizon_scale`` shape the label (``ml4trading.models.learned.horizon``);
     #: ``extra_features`` adds the slow features to the frames (``build_frames``);
+    #: ``risk_adjust`` and ``vol_window`` scale the target by the symbol's trailing volatility
+    #: (``ml4trading.models.learned.risk_adjust``);
     #: ``smooth_halflife`` is only checked here, nothing reads it yet.
     SHARED_PARAMS: ClassVar[tuple[str, ...]] = (
         "horizon",
         "horizon_scale",
         "smooth_halflife",
         "extra_features",
+        "risk_adjust",
+        "vol_window",
     )
 
     #: The columns of the ``feature_set`` parameter, set by ``_read_feature_set`` in a model that
@@ -120,6 +137,10 @@ class LearnedModel(Model):
         horizon, scale = self.params.get("horizon", 1), self.params.get("horizon_scale", "sum")
         halflife = self.params.get("smooth_halflife", 0)
         extra = self.params.get("extra_features", False)
+        risk_adjust, vol_window = (
+            self.params.get("risk_adjust", "none"),
+            self.params.get("vol_window", 63),
+        )
         if isinstance(horizon, bool) or not isinstance(horizon, int | np.integer) or horizon < 1:
             raise ValueError(f"{self.name}: horizon must be an integer >= 1, got {horizon!r}")
         if scale not in HORIZON_SCALES:
@@ -137,6 +158,15 @@ class LearnedModel(Model):
             )
         if not isinstance(extra, bool):
             raise ValueError(f"{self.name}: extra_features must be true or false, got {extra!r}")
+        if not isinstance(risk_adjust, str) or risk_adjust not in RISK_ADJUSTS:
+            raise ValueError(
+                f"{self.name}: risk_adjust must be one of {RISK_ADJUSTS}, got {risk_adjust!r}"
+            )
+        if not valid_vol_window(vol_window):
+            raise ValueError(
+                f"{self.name}: vol_window must be an integer >= {MIN_VOL_OBSERVATIONS} "
+                f"(sessions), got {vol_window!r}"
+            )
 
     def _read_feature_set(self) -> None:
         """Read the ``feature_set`` parameter into ``_feature_set`` -- the set's columns, or None
@@ -170,6 +200,16 @@ class LearnedModel(Model):
     def horizon_scale(self) -> str:
         """``sum`` or ``mean`` (``ml4trading.models.learned.horizon.HORIZON_SCALES``)."""
         return str(self.params.get("horizon_scale", "sum"))
+
+    @property
+    def risk_adjust(self) -> str:
+        """``none``, ``vol`` or ``vol_return`` (``ml4trading.models.learned.risk_adjust``)."""
+        return str(self.params.get("risk_adjust", "none"))
+
+    @property
+    def vol_window(self) -> int:
+        """How many of a symbol's previous rows its volatility is measured over."""
+        return int(self.params.get("vol_window", 63))
 
     @property
     @abstractmethod
@@ -251,6 +291,7 @@ class LearnedModel(Model):
         early_stop: EarlyStop,
         horizon: int = 1,
         horizon_scale: str = "sum",
+        sigma: np.ndarray | None = None,
     ) -> tuple[pd.DataFrame, np.ndarray, EarlyStop]:
         """The early-stopping set: the rows of ``early_stop.periods`` x ``early_stop.symbols``
         with a label (a symbol's last overnight period has none), and their label through the
@@ -258,9 +299,10 @@ class LearnedModel(Model):
         ``horizon`` label that exits after the first session following the last of the periods
         is no label, as in the validation scoring. As there, the transform is applied to every
         pool row of those periods, so a period's mean is the pool's cross-section the fit
-        demeaned over, and only then taken at the evaluation rows. ``X`` is indexed by
-        (period, symbol), row-aligned with ``panel``."""
-        label = window_labels(panel, early_stop.periods, horizon, horizon_scale, transform)
+        demeaned over, and only then taken at the evaluation rows. With ``sigma`` (row-aligned
+        with ``panel``) the label is divided by it first, as in the fit; a row without a sigma
+        is no label. ``X`` is indexed by (period, symbol), row-aligned with ``panel``."""
+        label = window_labels(panel, early_stop.periods, horizon, horizon_scale, transform, sigma)
         rows = np.isfinite(label) & panel["symbol"].isin(set(early_stop.symbols)).to_numpy()
         if not rows.any():
             raise ValueError("early stopping: no labelled evaluation row")
@@ -276,6 +318,9 @@ class LearnedModel(Model):
             )
         )
         y_h, exit_session = horizon_labels(panel, self.horizon, self.horizon_scale)
+        sigma = target_volatility(panel, self.risk_adjust, self.vol_window)
+        if sigma is not None:  # the fit's units: the label per unit of volatility, NaN without one
+            y_h = y_h / sigma
         fit = np.zeros(len(panel), dtype=bool)
         if fit_window is not None:
             fit[panel.index.get_indexer(rows_in(panel, fit_window).index)] = True
@@ -290,6 +335,8 @@ class LearnedModel(Model):
                 None,
                 horizon=self.horizon,
                 horizon_scale=self.horizon_scale,
+                risk_adjust=self.risk_adjust,
+                vol_window=self.vol_window,
             )
         y_raw, period = y_h[fit], panel["period"].to_numpy()[fit]
         transform = fit_label_transform(self.label_kind, y_raw, period)
@@ -298,7 +345,7 @@ class LearnedModel(Model):
             None
             if early_stop is None
             else self._evaluation_rows(
-                panel, X, transform, early_stop, self.horizon, self.horizon_scale
+                panel, X, transform, early_stop, self.horizon, self.horizon_scale, sigma
             )
         )
         # a model that cannot stop early may declare ``_fit`` without ``eval_set``
@@ -308,11 +355,16 @@ class LearnedModel(Model):
 
         rows = rows_in(panel, predict_window)
         at = panel.index.get_indexer(rows.index)
+        predicted = artifact.predict(X.iloc[at])
+        if sigma is not None:  # the model's output is in the fit's units; the trader reads returns
+            predicted = scale_predictions(
+                predicted, sigma[at], rows["period"].to_numpy(), self.risk_adjust
+            )
         out = pd.DataFrame(
             {
                 "period": rows["period"].to_numpy(),
                 "symbol": rows["symbol"].to_numpy(),
-                "prediction": artifact.predict(X.iloc[at]),
+                "prediction": predicted,
             }
         )
         return FoldResult(
@@ -327,4 +379,6 @@ class LearnedModel(Model):
             artifact.eval_mse,
             self.horizon,
             self.horizon_scale,
+            self.risk_adjust,
+            self.vol_window,
         )

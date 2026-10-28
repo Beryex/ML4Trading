@@ -114,6 +114,20 @@ universe decides what is traded.
   against VOO on the sessions both have. They are columns like any other: `cs_rank` ranks them,
   and a feature set may name them (refused by name unless `extra_features` is on). The option
   is built into the run's frames, so it is fixed for a run and cannot be searched in a grid.
+- **Volatility-scaled target** (`--set model.risk_adjust=vol` or `vol_return`, with
+  `model.vol_window`, 63 sessions; both models, `none` by default): the trader ranks and weights
+  names by |prediction|, so a model fitted on the raw return favours the volatile names. Here the
+  fit's label is divided by the symbol's trailing volatility -- the standard deviation of its own
+  one-session returns over `vol_window` rows, in the style of Moskowitz, Ooi & Pedersen (2012,
+  scaling by ex-ante volatility) with a short trailing window (Ang, Hodrick, Xing & Zhang 2006).
+  The window ends two rows before the row it scales: the previous row's return runs up to the
+  row's own open, which a prediction may not read. `vol` multiplies the model's output by the
+  median volatility of that session's stocks, so the ranking and the weights follow the
+  risk-adjusted forecast and the units stay a return's; `vol_return` multiplies each stock by its
+  own volatility, a per-stock return forecast. A row with fewer than 21 finite returns in its
+  window has no volatility: it is not fitted on, and predicts nothing. The validation label, the
+  early-stopping set and the R² are per unit of volatility. It is a fit-time option, so a grid
+  may search it.
 - **`linear`**: an elastic net on the standardized features. A missing value is replaced by the
   median of its feature over the same session's stocks; the penalty is a fraction `alpha_ratio`
   of the smallest one that zeroes every coefficient (scikit-learn's `ElasticNetCV` convention).
@@ -154,7 +168,7 @@ universe decides what is traded.
   Sharpe like any method's. Each fold also records every candidate's out-of-sample R², against
   the constant fitted on its training rows (`candidate_val_r2` in `fold.json`); it is never
   ranked on. R² (and `r2_mse` below) is measured in each run's own label units, so it compares
-  only across runs with the same `model.label`; net Sharpe and IC compare across label
+  only across runs with the same `model.label` and `model.risk_adjust`; net Sharpe and IC compare across label
   variants. For `nonlinear`, a per-fold search can take a grid's place (see below).
 
 ```bash

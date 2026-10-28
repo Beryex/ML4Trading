@@ -70,7 +70,9 @@ class FoldResult:
     kept, and ``eval_mse``, the squared error on that set at that round; otherwise both are
     None. ``horizon`` and ``horizon_scale`` are the label the fit trained on
     (``ml4trading.models.learned.horizon``; 1 and ``sum``, one period's return, for a model with
-    no horizon): the validation scoring builds its labels the same way."""
+    no horizon): the validation scoring builds its labels the same way. So do ``risk_adjust``
+    and ``vol_window`` (``ml4trading.models.learned.risk_adjust``; ``none`` and 63 for a model
+    that does not scale its target): the label is then per unit of volatility."""
 
     predictions: pd.DataFrame
     artifact: object | None
@@ -83,6 +85,8 @@ class FoldResult:
     eval_mse: float | None = None
     horizon: int = 1
     horizon_scale: str = "sum"
+    risk_adjust: str = "none"
+    vol_window: int = 63
 
 
 class Model(ABC):

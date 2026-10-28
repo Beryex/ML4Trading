@@ -39,7 +39,7 @@ def _check(h: int, scale: str) -> None:
         raise ValueError(f"horizon must be an integer >= 1, got {h!r}")
 
 
-def _symbol_codes(panel: pd.DataFrame) -> np.ndarray:
+def symbol_codes(panel: pd.DataFrame) -> np.ndarray:
     """A code per row for its symbol, refusing a panel that is not in (symbol, period) order:
     a horizon label reads the rows after a row, so a misordered panel would silently mix
     symbols or sessions."""
@@ -65,7 +65,7 @@ def horizon_labels(panel: pd.DataFrame, h: int, scale: str) -> tuple[np.ndarray,
     y = panel["y"].to_numpy(dtype=float)
     sessions = panel["session"].to_numpy()
     n = len(panel)
-    codes = _symbol_codes(panel)
+    codes = symbol_codes(panel)
     # NumPy deprecates a NaT without a time unit, so the missing value takes the sessions' own
     missing = np.datetime64("NaT", np.datetime_data(sessions.dtype)[0])
     exit_session = np.full(n, missing, dtype=sessions.dtype)
@@ -98,11 +98,17 @@ def realized_by(panel: pd.DataFrame, exit_session: np.ndarray, end) -> np.ndarra
     return np.asarray(pd.DatetimeIndex(exit_session) <= later.min())
 
 
-def window_labels(panel: pd.DataFrame, periods, h: int, scale: str, transform) -> np.ndarray:
+def window_labels(
+    panel: pd.DataFrame, periods, h: int, scale: str, transform, sigma: np.ndarray | None = None
+) -> np.ndarray:
     """The label a fit is scored on, for every panel row: NaN outside ``periods`` and where the
     row has no label; otherwise the horizon label through the fit's ``transform`` (None: as it
     is). The transform is applied to every pool row of ``periods`` that has a label, so a
     period's mean is the pool's cross-section the fit demeaned over.
+
+    With ``sigma`` (row-aligned with ``panel``: ``ml4trading.models.learned.risk_adjust``) the
+    label is first divided by it, the units a volatility-scaled fit trains on; a row whose sigma
+    is NaN has no label, and so takes no part in the transform's means either.
 
     For ``h > 1`` a row whose exit is after the first session following the last of ``periods``
     has no label either, and is left out of the transform's means too. At ``h == 1`` a label is
@@ -113,11 +119,13 @@ def window_labels(panel: pd.DataFrame, periods, h: int, scale: str, transform) -
         return label
     if h == 1:
         y_h = panel["y"].to_numpy(dtype=float)
-        usable = in_window & np.isfinite(y_h)
     else:
         y_h, exit_session = horizon_labels(panel, h, scale)
-        last = panel.loc[in_window, "session"].max()
-        usable = in_window & np.isfinite(y_h) & realized_by(panel, exit_session, last)
+    if sigma is not None:
+        y_h = y_h / sigma
+    usable = in_window & np.isfinite(y_h)
+    if h > 1:
+        usable &= realized_by(panel, exit_session, panel.loc[in_window, "session"].max())
     period = panel["period"].to_numpy()[usable]
     label[usable] = y_h[usable] if transform is None else transform.apply(y_h[usable], period)
     return label

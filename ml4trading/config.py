@@ -150,6 +150,14 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             # from the literature (ml4trading/features/slow.py). Fixed for a run: it cannot be
             # searched in a grid
             "extra_features": False,
+            # what the fit's label is divided by: "none", the symbol's trailing volatility ("vol":
+            # predictions come back times the period's median volatility, so the trader ranks by
+            # the risk-adjusted forecast; "vol_return": times each name's own), over the last
+            # vol_window sessions (Moskowitz, Ooi & Pedersen 2012 scale by ex-ante volatility; Ang,
+            # Hodrick, Xing & Zhang 2006 measure it over a short trailing window; 63 = a quarter,
+            # as the slow features' ivol_63)
+            "risk_adjust": "none",
+            "vol_window": 63,
             "feature_set": "all",  # every column; or a name in ml4trading/features/feature_sets/
             # a convergence cap, not a model choice: scikit-learn's default 1000 stops short at the
             # grid's smallest alpha_ratio, which took 59,010 iterations (0.4 s) on a full fit slice
@@ -181,6 +189,14 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
             # from the literature (ml4trading/features/slow.py). Fixed for a run: it cannot be
             # searched in a grid
             "extra_features": False,
+            # what the fit's label is divided by: "none", the symbol's trailing volatility ("vol":
+            # predictions come back times the period's median volatility, so the trader ranks by
+            # the risk-adjusted forecast; "vol_return": times each name's own), over the last
+            # vol_window sessions (Moskowitz, Ooi & Pedersen 2012 scale by ex-ante volatility; Ang,
+            # Hodrick, Xing & Zhang 2006 measure it over a short trailing window; 63 = a quarter,
+            # as the slow features' ivol_63)
+            "risk_adjust": "none",
+            "vol_window": 63,
             "num_leaves": 31,
             "min_data_in_leaf": 20,
             "learning_rate": 0.1,
