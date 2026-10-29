@@ -371,6 +371,18 @@ python -m ml4trading.diagnose --run runs/nonlinear
 - `summary.md`: the mean and median `val_net_sharpe`, the means of the headline diagnostics (a
   fold where one is undefined is not counted in its mean) and the 20 top-ranked features.
 
+## Reproducing the Initial ML Solution
+
+`scripts/initial_ml/` trains and backtests every run of the Initial ML Solution writeup:
+- the six baselines on the 502- and 552-symbol universes;
+- two three-feature linear baselines (`feature_set: three_feature`);
+- the per-fold-tuned `linear` and `nonlinear` grids;
+- the frozen `linear` (v29) and `nonlinear` hybrid (P3b) configurations;
+- the validation-selected splices.
+
+It then rebuilds the writeup's tables from the saved outputs. `scripts/initial_ml/README.md` has
+the commands. The runs go to `runs/` and the tables to `results/`; neither is committed.
+
 ## Adding a model
 
 1. Subclass `ml4trading.models.Model` and implement `fit_predict_fold(frames, fit_window,
@@ -405,5 +417,6 @@ ml4trading/   the package (one module per stage above, models/ for the methods, 
               the learned models' inputs)
 grids/        the learned models' per-fold hyperparameter grids
 tests/        unit and end-to-end tests on a synthetic dataset (no real data needed)
+scripts/      scripts/initial_ml/: the runs and tables of the Initial ML Solution
 DATA.md       the dataset card: contents, construction, known limitations
 ```
