@@ -28,8 +28,10 @@ from ml4trading.models import get_model
 from ml4trading.models.base import FoldResult, Frames
 from ml4trading.models.learned.base import EarlyStop
 
-#: The sampler's seed, hence the whole study's. 0 is the seed the project's fits already use
-#: (nonlinear's LightGBM ``seed=0``); no public source fixes one.
+#: The sampler's seed, hence the whole study's. ML4Investment seeds its TPESampler too, with its
+#: ``SEED`` of 42 (``optimize_model_hyperparameters`` in ml4investment/utils/model_training.py,
+#: ml4investment/config/global_settings.py); 0 is kept here as the seed the project's fits
+#: already use (nonlinear's LightGBM ``seed=0``).
 SEED = 0
 #: Most boosting rounds a trial may train: ML4Investment's ``NUM_ROUNDS`` default
 #: (ml4investment/config/global_settings.py).
