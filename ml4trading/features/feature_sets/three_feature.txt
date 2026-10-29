@@ -1,0 +1,6 @@
+# The three-feature simple ML baseline: the last session's close-to-close return, the 20-session
+# return and the 20-session realized volatility (std of daily close-to-close returns), all as of
+# the close before the decision.
+Return_1d
+Return_20d
+Volatility_20d
