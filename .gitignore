@@ -11,6 +11,7 @@ dist/
 # Data and run outputs are never committed (see DATA.md)
 data/
 runs/
+results/
 
 # OS / editors
 .DS_Store

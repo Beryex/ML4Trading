@@ -8,9 +8,7 @@ QQQ (Nasdaq-100). Under the ``proportional`` trader a single positive name takes
 
 from __future__ import annotations
 
-import pandas as pd
-
-from ml4trading.models.base import Model, rows_in
+from ml4trading.models.base import FoldResult, Model, rows_in
 from ml4trading.models.registry import register_model
 
 
@@ -24,15 +22,12 @@ class ConstantPortfolio(Model):
             raise ValueError(f"{self.name}: symbols absent from the dataset: {missing}")
         return list(self.predictions)
 
-    def fit(self, panel, window) -> None:
-        return None
-
-    def predict(self, panel: pd.DataFrame, window) -> pd.DataFrame:
-        rows = rows_in(panel, window)
+    def fit_predict_fold(self, frames, fit_window, predict_window) -> FoldResult:
+        rows = rows_in(frames.panel, predict_window)
         rows = rows[rows["symbol"].isin(set(self.predictions))]
         out = rows[["period", "symbol"]].copy()
         out["prediction"] = out["symbol"].map(self.predictions).astype(float)
-        return out.reset_index(drop=True)
+        return FoldResult(out.reset_index(drop=True), None, 0)
 
 
 @register_model("investment")

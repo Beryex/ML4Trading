@@ -6,9 +6,10 @@ import pytest
 
 from ml4trading import config
 from ml4trading.backtest import backtest
-from ml4trading.models import Model, register_model
+from ml4trading.data import load_bars, load_dividends
+from ml4trading.models import FoldResult, Model, register_model
 from ml4trading.models.base import rows_in
-from ml4trading.pipeline import load_panel
+from ml4trading.pipeline import load_frames
 from ml4trading.testing import assert_causal
 from ml4trading.train import train
 
@@ -23,21 +24,29 @@ SHORT_FOLDS = {
 @register_model("last_return_test")
 class LastReturn(Model):
     """Predicts each symbol's previous-period return times ``scale`` (a test stand-in for a
-    learned model: its fit records the mean label of its window)."""
+    learned model: its fit counts the labelled rows of its window)."""
 
-    def fit(self, panel, window):
-        rows = rows_in(panel, window)
-        self.mean_y = float(np.nanmean(rows["y"])) if len(rows) else 0.0
-        self.fit_window = window
-
-    def predict(self, panel, window):
+    def fit_predict_fold(self, frames, fit_window, predict_window):
+        panel = frames.panel
+        n_fit = 0 if fit_window is None else int(np.isfinite(rows_in(panel, fit_window)["y"]).sum())
         prev = panel.sort_values(["symbol", "period"]).copy()
         last = prev.groupby("symbol")["close"].pct_change()  # period t's own close: t-1 at best
         prev["prediction"] = last.groupby(prev["symbol"]).shift(1) * float(
             self.params.get("scale", 1.0)
         )
-        out = rows_in(prev, window)[["period", "symbol", "prediction"]]
-        return out.dropna().reset_index(drop=True)
+        out = rows_in(prev, predict_window)[["period", "symbol", "prediction"]]
+        return FoldResult(out.dropna().reset_index(drop=True), None, n_fit)
+
+
+FIT_WINDOW = (pd.Timestamp("2021-01-01"), pd.Timestamp("2021-05-21"))
+JUNE = (pd.Timestamp("2021-06-01"), pd.Timestamp("2021-06-30"))
+
+
+def _inputs(data_dir):
+    """(bars, dividends, K, pool) of the last_return_test method on ``data_dir``."""
+    cfg = config.resolve("last_return_test")
+    pool, _ = load_frames(cfg, data_dir)
+    return load_bars(data_dir, pool), load_dividends(data_dir, pool), cfg.K, pool
 
 
 config.METHOD_DEFAULTS["last_return_test"] = {
@@ -51,6 +60,7 @@ def test_investment_train_then_backtest(data_dir, tmp_path):
     run = train("investment", tmp_path / "run", data_dir, overrides=SHORT_FOLDS)
     run_meta = json.loads((run / "run.json").read_text())
     assert run_meta["folds"] == [f"F2021-{m:02d}" for m in range(6, 12)]
+    assert "hpo" not in run_meta  # a baseline has no search to record
     fold = json.loads((run / "folds" / "F2021-06" / "fold.json").read_text())
     assert fold["test"] == ["2021-06-01", "2021-06-30"]
     assert json.loads((run / "folds" / "F2021-06" / "universe.json").read_text()) == ["VOO"]
@@ -77,27 +87,42 @@ def test_a_learned_model_is_searched_per_fold_and_causal(data_dir, tmp_path):
     metrics = backtest(run, data_dir)
     assert metrics["n_periods"] > 100
 
-    cfg = config.resolve("last_return_test", SHORT_FOLDS)
-    _, panel = load_panel(cfg, data_dir)
     model = LastReturn(hold_overnight=True, scale=1.0)
-    model.fit(panel, (pd.Timestamp("2021-01-01"), pd.Timestamp("2021-05-31")))
-    assert_causal(model, panel, (pd.Timestamp("2021-06-01"), pd.Timestamp("2021-06-30")))
+    assert_causal(model, *_inputs(data_dir), FIT_WINDOW, JUNE)
+
+
+def test_a_fit_free_model_keeps_validation_too(data_dir, tmp_path):
+    run = train("investment", tmp_path / "run", data_dir, overrides=SHORT_FOLDS)
+    fdir = run / "folds" / "F2021-07"
+    val = pd.read_parquet(fdir / "val" / "predictions.parquet")
+    assert list(val.columns) == ["period", "symbol", "prediction", "y", "label"]
+    assert len(val) > 0
+    fold = json.loads((fdir / "fold.json").read_text())
+    assert fold["val_diagnostics"]["ic_mean"] is None  # a constant forecast has no IC
+    assert fold["val_diagnostics"]["net_sharpe"] == fold["candidate_val_net_sharpe"][0]
+
+
+def test_an_empty_validation_universe_still_writes_its_outputs(data_dir, tmp_path):
+    # momentum selects nobody on this data: no fit, no prediction, a book that never holds a name
+    run = train("momentum", tmp_path / "run", data_dir, overrides=SHORT_FOLDS)
+    fdir = run / "folds" / "F2021-07"
+    assert json.loads((fdir / "universe.json").read_text()) == []
+    val = pd.read_parquet(fdir / "val" / "predictions.parquet")
+    assert list(val.columns) == ["period", "symbol", "prediction", "y", "label"]
+    assert val.empty
+    diagnostics = json.loads((fdir / "fold.json").read_text())["val_diagnostics"]
+    assert diagnostics["ic_mean"] is None and diagnostics["r2_mse"] is None
+    assert diagnostics["same_sign_share"] is None
 
 
 def test_causality_check_catches_a_peeking_model(data_dir):
     class Peeking(LastReturn):
-        def predict(self, panel, window):
-            out = rows_in(panel, window)[["period", "symbol", "y"]]
-            return out.rename(columns={"y": "prediction"}).dropna()
+        def fit_predict_fold(self, frames, fit_window, predict_window):
+            out = rows_in(frames.panel, predict_window)[["period", "symbol", "y"]]
+            return FoldResult(out.rename(columns={"y": "prediction"}).dropna(), None, 0)
 
-    cfg = config.resolve("last_return_test")
-    _, panel = load_panel(cfg, data_dir)
     with pytest.raises(AssertionError):
-        assert_causal(
-            Peeking(hold_overnight=True),
-            panel,
-            (pd.Timestamp("2021-06-01"), pd.Timestamp("2021-06-30")),
-        )
+        assert_causal(Peeking(hold_overnight=True), *_inputs(data_dir), FIT_WINDOW, JUNE)
 
 
 def test_grids_search_model_parameters_only(data_dir, tmp_path):

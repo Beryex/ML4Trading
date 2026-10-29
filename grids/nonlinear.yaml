@@ -1,0 +1,8 @@
+# Per-fold grid for `nonlinear` (python -m ml4trading.train --method nonlinear --grid grids/nonlinear.yaml).
+# num_leaves: 2^4 - 1 and 2^6 - 1, around LightGBM's default 31.
+# min_data_in_leaf: decades above LightGBM's default 20.
+# learning_rate, n_estimators: LightGBM's defaults.
+model.num_leaves: [15, 63]
+model.min_data_in_leaf: [200, 2000]
+model.learning_rate: [0.1]
+model.n_estimators: [100]

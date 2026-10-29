@@ -130,6 +130,135 @@ METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
     # Last week's change as the forecast (reverse: its negative), rebalanced once per 5-session
     # block, the default trader on top. ``--set K=390`` is the daily version.
     "momentum": {"K": 1950, "model": {"hold_overnight": True, "reverse": False}},
+    # An elastic net on the ML4Investment features (ml4trading.models.learned.linear).
+    "linear": {
+        "K": 390,
+        "model": {
+            "hold_overnight": True,
+            "alpha_ratio": 0.01,  # a point of grids/linear.yaml
+            "l1_ratio": 0.5,  # scikit-learn ElasticNet's default
+            # the next session's return, as before; a longer label looks that many sessions ahead
+            # (Jegadeesh & Titman 1993 and Gu, Kelly & Xiu 2020 predict at monthly horizons)
+            "horizon": 1,
+            # the label is the sum of the horizon's returns; "mean": their average, per-session
+            # units (the units a cost gate sees: Gârleanu & Pedersen 2013)
+            "horizon_scale": "sum",
+            # the half-life, in sessions, of the exponential average the traded predictions are
+            # smoothed by over each symbol's recent rows; 0 = off, the predictions as they are
+            # (ml4trading/models/learned/smoothing.py)
+            "smooth_halflife": 0,
+            # False: ML4Investment's features alone; True adds the slow cross-sectional features
+            # from the literature (ml4trading/features/slow.py). Fixed for a run: it cannot be
+            # searched in a grid
+            "extra_features": False,
+            # what the fit's label is divided by: "none", the symbol's trailing volatility ("vol":
+            # predictions come back times the period's median volatility, so the trader ranks by
+            # the risk-adjusted forecast; "vol_return": times each name's own), over vol_window
+            # rows, ending two rows before the row (LABEL_LAG in models/learned/risk_adjust.py).
+            # Moskowitz, Ooi & Pedersen 2012 scale by an ex-ante volatility estimate of about 60
+            # days; Ang, Hodrick, Xing & Zhang 2006 measure it over a short trailing window; 63 =
+            # a quarter, as the slow features' ivol_63
+            "risk_adjust": "none",
+            "vol_window": 63,
+            "feature_set": "all",  # every column; or a name in ml4trading/features/feature_sets/
+            # a convergence cap, not a model choice: scikit-learn's default 1000 stops short at the
+            # grid's smallest alpha_ratio, which took 59,010 iterations (0.4 s) on a full fit slice
+            # and up to 241,123 on the synthetic test data
+            "max_iter": 1_000_000,
+        },
+    },
+    # LightGBM on the same features (ml4trading.models.learned.nonlinear): LightGBM 4's own
+    # defaults for every boosting parameter.
+    "nonlinear": {
+        "K": 390,
+        "model": {
+            "hold_overnight": True,
+            "loss": "l1",  # ML4Investment's TRAIN_OBJECTIVE, regression_l1
+            "label": "raw",  # the realized return as it is; the variants: models.learned.labels
+            "feature_transform": "none",  # the features as they are; "cs_rank": ranked per period
+            "stock_id": "categorical",  # the stock code as a categorical feature; "drop": unused
+            "feature_set": "all",  # every column; or a name in ml4trading/features/feature_sets/
+            # the next session's return, as before; a longer label looks that many sessions ahead
+            # (Jegadeesh & Titman 1993 and Gu, Kelly & Xiu 2020 predict at monthly horizons)
+            "horizon": 1,
+            # the label is the sum of the horizon's returns; "mean": their average, per-session
+            # units (the units a cost gate sees: Gârleanu & Pedersen 2013)
+            "horizon_scale": "sum",
+            # the half-life, in sessions, of the exponential average the traded predictions are
+            # smoothed by over each symbol's recent rows; 0 = off, the predictions as they are
+            # (ml4trading/models/learned/smoothing.py)
+            "smooth_halflife": 0,
+            # False: ML4Investment's features alone; True adds the slow cross-sectional features
+            # from the literature (ml4trading/features/slow.py). Fixed for a run: it cannot be
+            # searched in a grid
+            "extra_features": False,
+            # what the fit's label is divided by: "none", the symbol's trailing volatility ("vol":
+            # predictions come back times the period's median volatility, so the trader ranks by
+            # the risk-adjusted forecast; "vol_return": times each name's own), over vol_window
+            # rows, ending two rows before the row (LABEL_LAG in models/learned/risk_adjust.py).
+            # Moskowitz, Ooi & Pedersen 2012 scale by an ex-ante volatility estimate of about 60
+            # days; Ang, Hodrick, Xing & Zhang 2006 measure it over a short trailing window; 63 =
+            # a quarter, as the slow features' ivol_63
+            "risk_adjust": "none",
+            "vol_window": 63,
+            "num_leaves": 31,
+            "min_data_in_leaf": 20,
+            "learning_rate": 0.1,
+            "n_estimators": 100,
+            "feature_fraction": 1.0,
+            "bagging_fraction": 1.0,
+            "bagging_freq": 0,
+            "lambda_l1": 0.0,
+            "lambda_l2": 0.0,
+            "max_depth": -1,
+            "min_gain_to_split": 0.0,
+            "min_sum_hessian_in_leaf": 0.001,
+            "max_bin": 255,
+            # categorical splits on stock_id: LightGBM 4's defaults (Parameters, "Learning
+            # Control Parameters": cat_smooth, min_data_per_group, max_cat_threshold, cat_l2)
+            "cat_smooth": 10.0,
+            "min_data_per_group": 100,
+            "max_cat_threshold": 32,
+            "cat_l2": 10.0,
+            # piece-wise linear trees: off, and the ridge penalty on a leaf's coefficients;
+            # LightGBM 4's defaults (Parameters: linear_tree is under "IO Parameters", "Dataset
+            # Parameters", linear_lambda under "Learning Control Parameters"; method: Shi, Li & Li
+            # 2019, "Gradient Boosting With Piece-Wise Linear Regression Trees", IJCAI). Needs
+            # loss "mse"
+            "linear_tree": False,
+            "linear_lambda": 0.0,
+            # noise-robust splits, all under "Learning Control Parameters" and all at LightGBM 4's
+            # defaults: extra_trees (off; Geurts, Ernst & Wehenkel 2006, "Extremely randomized
+            # trees": LightGBM then checks one randomly drawn threshold per feature at a node),
+            # path_smooth (0.0: no smoothing applied to tree nodes, which guards leaves with few
+            # rows; above 0 LightGBM silently raises a min_data_in_leaf below 2 to 2),
+            # feature_fraction_bynode (1.0: every feature is a candidate at each node; below 1 it
+            # multiplies feature_fraction)
+            "extra_trees": False,
+            "path_smooth": 0.0,
+            "feature_fraction_bynode": 1.0,
+            # a feature -> sign (-1, 0 or +1) mapping: the booster's output is non-increasing /
+            # unconstrained / non-decreasing in that feature. LightGBM's monotone_constraints
+            # ("Learning Control Parameters"; default none), translated per fit to its per-column
+            # list; {} passes nothing. monotone_constraints_method (basic, intermediate or
+            # advanced; "Learning Control Parameters", default basic) applies only to a non-empty
+            # mapping
+            "monotone_constraints": {},
+            "monotone_constraints_method": "basic",
+            # boosting from an initial estimate F0 (Friedman 2001, "Greedy Function
+            # Approximation: A Gradient Boosting Machine", Annals of Statistics): "none" (today's
+            # model) starts from LightGBM's own constant; "linear" first fits linear's elastic net
+            # on the same fit rows and labels and hands its prediction to LightGBM as the
+            # Dataset's init_score (LightGBM's Python API, lightgbm.Dataset), so the trees fit
+            # what it leaves. The net's penalty and columns are linear's defaults above:
+            # alpha_ratio 0.01, l1_ratio 0.5 (scikit-learn ElasticNet's default) and every column
+            # (stock_id is never used by the net)
+            "init_model": "none",
+            "init_alpha_ratio": 0.01,
+            "init_l1_ratio": 0.5,
+            "init_feature_set": "all",
+        },
+    },
 }
 
 

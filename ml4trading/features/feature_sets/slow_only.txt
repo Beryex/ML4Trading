@@ -1,0 +1,15 @@
+# stock_id and the slow features of ml4trading.features.slow only (extra_features: true).
+stock_id
+mom_12_1
+mom_6_1
+mom_1m
+high_52w
+max_21
+beta_252
+ivol_63
+resid_mom_12_1
+amihud_21
+rskew_21
+overnight_21
+intraday_21
+volatility_252

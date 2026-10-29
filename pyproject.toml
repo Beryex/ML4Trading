@@ -11,9 +11,12 @@ requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26",
     "pandas>=2.2",
+    "lightgbm>=4.0",
+    "optuna>=4.0",
     "pandas-market-calendars>=4.6",
     "pyarrow>=15.0",
     "pyyaml>=6.0",
+    "scikit-learn>=1.4",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +30,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["ml4trading*"]
+
+[tool.setuptools.package-data]
+"ml4trading.features" = ["feature_sets/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

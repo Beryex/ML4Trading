@@ -81,6 +81,21 @@ def apply_caps(weights: np.ndarray, max_symbol_weight: float, gross_exposure_cap
     return w
 
 
+def cost_gate(
+    w: np.ndarray, px: np.ndarray, *, trader: TraderConfig, costs: CostConfig, capital: float
+) -> np.ndarray:
+    """Step 4's threshold per selected name: the round-trip cost fraction its |prediction| must
+    exceed. ``w``: the capped weights, ``px``: the entry prices (both aligned on the selected
+    names); a name with no notional can never pay, its gate is infinite."""
+    k = trader.cost_safety_factor
+    notional = w * float(capital)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        est_shares = np.where(notional > 0.0, notional / px, 0.0)
+        comm = 2.0 * np.asarray(commission(est_shares, costs), dtype=float)
+        comm_frac = np.where(notional > 0.0, comm / notional, np.inf)
+    return k * round_trip_spread_fraction(costs) * costs.spread + k * comm_frac
+
+
 def target_weights(
     scores: pd.DataFrame,
     *,
@@ -106,13 +121,7 @@ def target_weights(
     w = apply_caps(absm / absm.sum(), trader.max_symbol_weight, trader.gross_exposure_cap)
 
     # cost gate
-    k = trader.cost_safety_factor
-    notional = w * float(capital)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        est_shares = np.where(notional > 0.0, notional / px[pos], 0.0)
-        comm = 2.0 * np.asarray(commission(est_shares, costs), dtype=float)
-        comm_frac = np.where(notional > 0.0, comm / notional, np.inf)
-    gate = k * round_trip_spread_fraction(costs) * costs.spread + k * comm_frac
+    gate = cost_gate(w, px[pos], trader=trader, costs=costs, capital=capital)
     keep = np.abs(pred[pos]) > gate
     pos, w = pos[keep], w[keep]
     if pos.size == 0:
