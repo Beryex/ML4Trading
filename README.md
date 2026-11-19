@@ -417,6 +417,7 @@ ml4trading/   the package (one module per stage above, models/ for the methods, 
               the learned models' inputs)
 grids/        the learned models' per-fold hyperparameter grids
 tests/        unit and end-to-end tests on a synthetic dataset (no real data needed)
-scripts/      scripts/initial_ml/: the runs and tables of the Initial ML Solution
+scripts/      scripts/initial_ml/: the runs and tables of the Initial ML Solution;
+              scripts/field_eval/: the field pilot and the order-rule variants
 DATA.md       the dataset card: contents, construction, known limitations
 ```
