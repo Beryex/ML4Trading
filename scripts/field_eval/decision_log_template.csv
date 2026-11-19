@@ -1,0 +1,6 @@
+submitted_at_et,trade_date,participant_id,group,symbol,recommended_side,recommended_shares,decision,target_side,target_shares,confidence_1to5,reason
+2026-11-19 08:40,2026-11-19,P1,recommendation,AAPL,BUY,12,follow,BUY,12,4,
+2026-11-19 08:41,2026-11-19,P1,recommendation,TSLA,SHORT,5,skip,FLAT,0,2,does not want to short
+2026-11-19 08:42,2026-11-19,P1,recommendation,MSFT,BUY,8,change,BUY,4,3,half size
+2026-11-19 09:05,2026-11-19,P4,control,NVDA,,,own,BUY,20,3,earnings momentum
+2026-11-19 09:06,2026-11-19,P5,control,,,,no change,,,,
